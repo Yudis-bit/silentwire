@@ -1,0 +1,23 @@
+[package]
+name = "silentwire-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+authors.workspace = true
+description = "Command-line scanner and vector runner for BIP-352 Silent Payments"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/silentwire-cli"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+silentwire = { workspace = true, features = ["std"] }
+bdk-silentwire.workspace = true
+hex = "=0.4.3"
+serde_json = "=1.0.154"
+
+[lints]
+workspace = true

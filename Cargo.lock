@@ -487,6 +487,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "silentwire-cli"
+version = "0.1.0"
+dependencies = [
+ "bdk-silentwire",
+ "hex",
+ "serde_json",
+ "silentwire",
+]
+
+[[package]]
 name = "silentwire-ffi"
 version = "0.1.0"
 dependencies = [

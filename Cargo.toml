@@ -4,6 +4,7 @@ members = [
     "crates/silentwire",
     "crates/bdk-silentwire",
     "crates/silentwire-ffi",
+    "crates/silentwire-cli",
 ]
 
 [workspace.package]
