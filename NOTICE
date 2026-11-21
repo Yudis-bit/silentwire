@@ -1,0 +1,12 @@
+The complete unified Jacobian mixed-addition formula in coordinates.rs follows
+Brier & Joye (PKC 2002) as formulated in bitcoin-core/secp256k1 (MIT License),
+scaled by s = 2 to avoid field halving. Distinct Jacobian mixed addition
+follows Bernstein & Lange (madd-2007-bl).
+
+The homogeneous complete mixed-addition formula retained for batch normalization
+tests in coordinates.rs is adapted from RustCrypto k256 0.13.4
+src/arithmetic/projective.rs (Renes-Costello-Batina 2015, Algorithm 8).
+Copyright (c) RustCrypto Developers. MIT OR Apache-2.0.
+Upstream: https://github.com/RustCrypto/elliptic-curves/tree/k256/v0.13.4/k256
+
+The workspace LICENSE-MIT and LICENSE-APACHE retain the license terms.
