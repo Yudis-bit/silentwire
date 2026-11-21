@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format Check
+        run: cargo fmt --all --check
+
+      - name: Workspace Check
+        run: cargo check --workspace
+
+      - name: No-Default Features Check
+        run: cargo check -p silentwire --no-default-features
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Release Test Suite
+        run: cargo test --workspace --release
+
+      - name: C11 / C++17 FFI Verification
+        run: |
+          make ffi
+          cc -std=c11 -pedantic -Wall -Wextra -Werror -x c -fsyntax-only bindings/include/silentwire.h
+          c++ -std=c++17 -Wall -Wextra -Werror -x c++ -fsyntax-only bindings/include/silentwire.h
+
+      - name: Valgrind Constant-Time Verification
+        run: |
+          sudo apt-get update && sudo apt-get install -y valgrind
+          cc -O2 -g -Wall -Wextra -I tests -I bindings/include tests/ctime.c -L target/release -lsilentwire_ffi -Wl,-rpath,target/release -o target/ffi/test_ctime
+          valgrind --error-exitcode=42 --leak-check=no ./target/ffi/test_ctime
+          set +e
+          valgrind --error-exitcode=42 --leak-check=no ./target/ffi/test_ctime --negative-control
+          status=$?
+          set -e
+          test "$status" -eq 42
+
+      - name: Compare Benchmark Verification
+        run: cargo run -p silentwire-cli --release -- compare --txs 10
+
+      - name: Crate Packaging Verification
+        run: cargo package --workspace --exclude silentwire-cli --exclude silentwire-ffi
