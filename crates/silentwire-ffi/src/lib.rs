@@ -1,7 +1,7 @@
 use silentwire::{
     k256::{self, elliptic_curve::PrimeField},
     point,
-    zeroize::Zeroizing,
+    zeroize::{Zeroize, Zeroizing},
     SpScannerNaive,
 };
 
@@ -183,12 +183,15 @@ unsafe fn scan_inner(
         receiver.declassify_variants(|ptr, len| unsafe {
             valgrind_make_mem_defined(ptr, len);
         });
-        let Ok(found) = receiver.scan_shared(&shared, outputs) else {
+        let Ok(mut found) = receiver.scan_shared(&shared, outputs) else {
             return 1;
         };
         // The written count is independent of whether the output capacity suffices.
         unsafe { written.write(found.len()) };
         if found.len() > capacity {
+            for payment in &mut found {
+                payment.zeroize();
+            }
             return 2;
         }
         for (index, payment) in found.iter().enumerate() {
@@ -203,6 +206,9 @@ unsafe fn scan_inner(
             };
             // Capacity covers index. Source and destination do not overlap.
             unsafe { matches.add(index).write(value) };
+        }
+        for payment in &mut found {
+            payment.zeroize();
         }
         0
     });
@@ -280,20 +286,17 @@ pub unsafe extern "C" fn silentwire_scan_batch_glv(
         return 1;
     }
     let result = std::panic::catch_unwind(|| {
-        if tx_count == 0 {
-            return 0;
-        }
         let labels_slice = if label_count == 0 {
             &[]
         } else {
             unsafe { core::slice::from_raw_parts(labels, label_count) }
         };
-        let mut key_arr = [0u8; 32];
+        let mut key_arr = Zeroizing::new([0u8; 32]);
         unsafe { core::ptr::copy_nonoverlapping(scan_key, key_arr.as_mut_ptr(), 32) };
         let mut spend_arr = [0u8; 33];
         unsafe { core::ptr::copy_nonoverlapping(spend_pubkey, spend_arr.as_mut_ptr(), 33) };
 
-        let ct_option = k256::Scalar::from_repr(key_arr.into());
+        let ct_option = k256::Scalar::from_repr((*key_arr).into());
         let is_some = ct_option.is_some();
         let scan_val = ct_option.unwrap_or(k256::Scalar::ZERO);
         let is_zero = scan_val.is_zero();
@@ -314,6 +317,9 @@ pub unsafe extern "C" fn silentwire_scan_batch_glv(
         ) else {
             return 1;
         };
+        if tx_count == 0 {
+            return 0;
+        }
         receiver.declassify_variants(|ptr, len| unsafe {
             valgrind_make_mem_defined(ptr, len);
         });
@@ -359,17 +365,26 @@ pub unsafe extern "C" fn silentwire_scan_batch_glv(
             )
             .is_err()
         {
+            for m in &mut found {
+                m.private_key_tweak.zeroize();
+            }
             return 1;
         }
 
         let total_matches = found.len();
         unsafe { written.write(total_matches) };
         if total_matches > capacity {
+            for m in &mut found {
+                m.private_key_tweak.zeroize();
+            }
             return 2;
         }
 
-        for (dest_idx, value) in found.into_iter().enumerate() {
-            unsafe { matches.add(dest_idx).write(value) };
+        for (dest_idx, value) in found.iter().enumerate() {
+            unsafe { matches.add(dest_idx).write(*value) };
+        }
+        for m in &mut found {
+            m.private_key_tweak.zeroize();
         }
         0
     });
@@ -408,14 +423,15 @@ pub unsafe extern "C" fn silentwire_hardened_multiply(
             core::ptr::copy_nonoverlapping(blinding_2, b2_arr.as_mut_ptr(), 32);
             core::ptr::copy_nonoverlapping(base_pubkey, base_arr.as_mut_ptr(), 33);
         }
-        let parse_ct_scalar = |arr: &[u8; 32]| -> Option<k256::Scalar> {
+        let parse_ct_scalar = |arr: &[u8; 32]| -> Option<Zeroizing<k256::Scalar>> {
             let ct = k256::Scalar::from_repr((*arr).into());
-            let valid = (ct.is_some() & !ct.unwrap_or(k256::Scalar::ZERO).is_zero()).unwrap_u8();
+            let val = ct.unwrap_or(k256::Scalar::ZERO);
+            let valid = (ct.is_some() & !val.is_zero()).unwrap_u8();
             unsafe { valgrind_make_mem_defined(&valid as *const u8, 1) };
             if valid == 0 {
                 None
             } else {
-                Some(ct.unwrap_or(k256::Scalar::ZERO))
+                Some(Zeroizing::new(val))
             }
         };
         let (Some(s), Some(b1), Some(b2)) = (
@@ -467,7 +483,7 @@ pub unsafe extern "C" fn silentwire_dleq_prove(
             core::ptr::copy_nonoverlapping(b_pubkey, b_arr.as_mut_ptr(), 33);
         }
         let ct = k256::Scalar::from_repr((*a_arr).into());
-        let a_val = ct.unwrap_or(k256::Scalar::ZERO);
+        let a_val = Zeroizing::new(ct.unwrap_or(k256::Scalar::ZERO));
         let valid = (ct.is_some() & !a_val.is_zero()).unwrap_u8();
         unsafe { valgrind_make_mem_defined(&valid as *const u8, 1) };
         if valid == 0 {

@@ -101,7 +101,7 @@ JNIEXPORT jbyteArray JNICALL Java_org_silentwire_Silentwire_scanBatchGlv(
         return invalid(env, "Transaction count mismatch");
 
     jsize output_bytes = (*env)->GetArrayLength(env, outputs);
-    if (output_bytes % 32 != 0 || output_bytes > 4096 * 32)
+    if (output_bytes < 0 || output_bytes % 32 != 0 || (size_t)output_bytes > (size_t)tx_count * 4096 * 32)
         return invalid(env, "Invalid outputs length");
 
     jsize label_count = (*env)->GetArrayLength(env, labels);
@@ -142,11 +142,11 @@ JNIEXPORT jbyteArray JNICALL Java_org_silentwire_Silentwire_scanBatchGlv(
         int counts_valid = 1;
 
         for (jsize i = 0; i < tx_count; i++) {
-            if (counts[i] < 0) { counts_valid = 0; break; }
+            if (counts[i] < 0 || counts[i] > 4096) { counts_valid = 0; break; }
             size_t c = (size_t)counts[i];
-            if (output_offset + c > total_outputs) { counts_valid = 0; break; }
+            if (c > total_outputs - output_offset) { counts_valid = 0; break; }
             memcpy(txs[i].transaction_tweak, raw_tweaks + (size_t)i * 33, 33);
-            txs[i].outputs = raw_outputs + output_offset * 32;
+            txs[i].outputs = c ? (raw_outputs + output_offset * 32) : NULL;
             txs[i].output_count = c;
             output_offset += c;
         }

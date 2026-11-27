@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     VALGRIND_MAKE_MEM_DEFINED(batch_matches, sizeof(batch_matches));
     if (result4 != 0 || written != 16) return 4;
 
-    /* Dual-blinded HardenedMultiplier scalar multiplication. */
+    /* Dual-blinded HardenedMultiplier scalar multiplication (taint secret + both blinds). */
     uint8_t blind1[32] = {0};
     uint8_t blind2[32] = {0};
     blind1[31] = 0x37;
@@ -90,20 +90,26 @@ int main(int argc, char **argv) {
     uint8_t out_pub[33] = {0};
     memcpy(scan_copy, scan, 32);
     VALGRIND_MAKE_MEM_UNDEFINED(scan_copy, sizeof(scan_copy));
+    VALGRIND_MAKE_MEM_UNDEFINED(blind1, sizeof(blind1));
+    VALGRIND_MAKE_MEM_UNDEFINED(blind2, sizeof(blind2));
     int32_t result5 = silentwire_hardened_multiply(scan_copy, tweak, blind1, blind2, out_pub);
     VALGRIND_MAKE_MEM_DEFINED(scan_copy, sizeof(scan_copy));
+    VALGRIND_MAKE_MEM_DEFINED(blind1, sizeof(blind1));
+    VALGRIND_MAKE_MEM_DEFINED(blind2, sizeof(blind2));
     VALGRIND_MAKE_MEM_DEFINED(&result5, sizeof(result5));
     VALGRIND_MAKE_MEM_DEFINED(out_pub, sizeof(out_pub));
     if (result5 != 0 || (out_pub[0] != 2 && out_pub[0] != 3)) return 5;
 
-    /* BIP-374 DLEQ prove with tainted secret scalar. */
+    /* BIP-374 DLEQ prove with tainted secret scalar and aux_rand. */
     uint8_t aux_rand[32];
     memset(aux_rand, 0x5a, sizeof(aux_rand));
     uint8_t proof[64] = {0};
     memcpy(scan_copy, scan, 32);
     VALGRIND_MAKE_MEM_UNDEFINED(scan_copy, sizeof(scan_copy));
+    VALGRIND_MAKE_MEM_UNDEFINED(aux_rand, sizeof(aux_rand));
     int32_t result6 = silentwire_dleq_prove(scan_copy, tweak, aux_rand, proof);
     VALGRIND_MAKE_MEM_DEFINED(scan_copy, sizeof(scan_copy));
+    VALGRIND_MAKE_MEM_DEFINED(aux_rand, sizeof(aux_rand));
     VALGRIND_MAKE_MEM_DEFINED(&result6, sizeof(result6));
     VALGRIND_MAKE_MEM_DEFINED(proof, sizeof(proof));
     if (result6 != 0) return 6;
