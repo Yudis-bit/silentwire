@@ -19,14 +19,15 @@ are compressed 33-byte secp256k1 points. The tweak is `T = h * A_sum`, where
 eligible input key. Passing `A_sum` alone omits the input hash.
 `PreparedTransaction` and `bdk-silentwire` build `T` from eligible inputs with
 opcode-aware P2PKH push parsing, BIP-141 nested P2SH-P2WPKH direct-push and
-HASH160 checks, and 2-element P2WPKH witness checks.
+HASH160 checks, and 2-element P2WPKH / nested witness pubkey HASH160 checks.
 
 `output_index` gives the position in the supplied output slice and
 `derivation_index` records `k`. Matches also carry `taproot_pubkey`,
 `tweak_scalar`, and an optional label index. `scan_block` pairs each
 transaction tweak with its own outputs and returns `BlockPaymentMatch` with
 `transaction_index` intact. `bdk-silentwire` maps compact Taproot positions
-back to transaction vouts and decodes bounded CompactSize CTIS blocks.
+back to transaction vouts, skips coinbase transactions, chunks blocks beyond
+`MAX_BATCH` (4,096), and decodes bounded canonical CompactSize streams.
 
 Allocation and arithmetic
 -------------------------
@@ -61,32 +62,38 @@ label table with batched normalization.
 Protocol support and safety boundaries
 --------------------------------------
 
-`address` implements `no_std` Bech32m encoding and decoding for `sp` and `tsp`
-addresses up to 1023 characters, requiring exact 66-byte payloads on `v0`,
-preserving trailing `extension_data` on `v1..=v30`, and rejecting `v31` or
-Bech32 checksums. `sender::create_outputs_checked` orders `OwnVerified`
+`address` implements `no_std + alloc` Bech32m encoding and decoding for `sp`
+and `tsp` addresses up to 1023 characters, requiring exact 66-byte payloads on
+`v0`, preserving trailing `extension_data` on `v1..=v30`, and rejecting `v31`
+or Bech32 checksums. `sender::create_outputs_checked` orders `OwnVerified`
 recipients ahead of `External` entries sharing a scan key so self-change stays
 recoverable, while rejecting distinct external parties colliding on a scan key
-with `Error::ScanKeyCollision`. `bip374` adds `no_std` DLEQ prove/verify,
-BIP-375 share aggregation, and lexicographical `B_spend` ordering checks
-(`Error::ChangeOrderShadowing`).
+with `Error::ScanKeyCollision`. `bip374` implements `no_std` BIP-374 v0.3.1
+DLEQ prove/verify (with fault-injection self-verification), BIP-375 share
+aggregation with canonical lexicographical `B_spend` ordering, and change
+shadowing checks (`Error::ChangeOrderShadowing`).
 
 `HardenedMultiplier` splits the scalar through two independent additive blinds
-held in `Zeroizing`, rejects degenerate blinds and quadratic twist points, and
-cross-checks both paths in constant time. `EmbeddedStaticScanner` keeps fixed
-compile-time arrays (4,712 bytes for `<16, 64, 8>` and 6,440 bytes for
-`<32, 64, 8>` on x86_64), derives the `m = 0` change label automatically,
-isolates output ranges per tweak, tracks consumed vouts, and exposes streaming
-`scan_tx`.
+held in `Zeroizing`, rejects degenerate blinds (`b1 == b2`, `b1 == -b2`,
+`b1 + b2 == s`, or equal to `0`/`s`) and quadratic twist points, and
+cross-checks both paths in constant time. `EmbeddedStaticScanner` compiles with
+`--no-default-features` without `alloc`, keeps fixed compile-time arrays (4,480
+bytes for `<16, 64, 8>` and 5,952 bytes for `<32, 64, 8>` on x86_64), derives
+the `m = 0` change label automatically, isolates output ranges per tweak,
+tracks source transaction indices and consumed vouts, wipes matches on `Drop`,
+and parses Taproot x-only outputs on the fly without stack-buffered field
+arrays.
 
 `silentwire`, `bdk-silentwire`, and `silentwire-cli` forbid unsafe Rust. Only
 `silentwire-ffi` uses `unsafe` for the C ABI and Valgrind declassification
-hooks. Constant-time control flow and memory access across all six C ABI entry
-points pass Valgrind 3.27.1 (`tests/ctime.c`: exit 0, `0 errors from 0 contexts`,
-with `--negative-control` exiting 42). Valgrind checks compiled x86_64 binaries
-for secret-dependent branches and addresses only. Physical DPA or EMA
-resistance depends on target silicon, and whole-program Cortex-M4 SRAM bounds
-require target linker maps and call-graph stack analysis.
+hooks. Constant-time control flow and memory access across all five C ABI entry
+points (six scenarios covering Mode A/B labels, batched GLV, dual-blinded
+multiplication with tainted blinds, and BIP-374 DLEQ proving with tainted
+`aux_rand`) pass Valgrind 3.27.1 (`tests/ctime.c`: exit 0, `0 errors from 0
+contexts`, with `--negative-control` exiting 42). Valgrind checks compiled
+x86_64 binaries for secret-dependent branches and addresses only. Physical DPA
+or EMA resistance depends on target silicon, and whole-program Cortex-M4 SRAM
+bounds require target linker maps and call-graph stack analysis.
 
 Benchmarks
 ----------
@@ -119,17 +126,21 @@ and `silentwire-cli`. C and C++ callers include `bindings/include/silentwire.h`
 cargo fmt --all --check
 cargo check --workspace --offline --locked
 cargo check -p silentwire --no-default-features --offline --locked
+cargo check -p silentwire --no-default-features --features alloc --offline --locked
 cargo clippy --workspace --all-targets --offline --locked -- -D warnings
 cargo test --workspace --release --offline --locked
 make ffi
 make bench
 ```
 
-`tests/official_vectors.rs` runs all 34 sending and 36 receiving official
-BIP-352 test vectors. `tests/differential_fuzz.rs` replays 100,000
-deterministic transactions against independent `k256` derivation. Details on
-formulas and static footprints are in `doc/MATHEMATICAL_SPECIFICATION.md` and
-`doc/HARDWARE_WALLET_SRAM.md`.
+`tests/official_vectors.rs` runs 34 sending and 36 receiving BIP-352 test
+vectors (29 sending / 30 receiving from `bitcoin/bips` `fdcd802` plus 5 sending
+/ 6 receiving `K_max` and label edge cases from `bitcoin/bips#2330`).
+`tests/bip374_vectors.rs` runs all 14 generate and 17 verify official BIP-374
+v0.3.1 test vectors from `bitcoin/bips/bip-0374`. `tests/differential_fuzz.rs`
+replays 100,000 deterministic transactions against independent `k256` derivation.
+Details on formulas and static footprints are in
+`doc/MATHEMATICAL_SPECIFICATION.md` and `doc/HARDWARE_WALLET_SRAM.md`.
 
 License
 -------

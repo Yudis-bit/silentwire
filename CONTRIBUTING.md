@@ -13,6 +13,7 @@ Run the local checks before sending a patch:
 cargo fmt --all --check
 cargo check --workspace --offline --locked
 cargo check -p silentwire --no-default-features --offline --locked
+cargo check -p silentwire --no-default-features --features alloc --offline --locked
 cargo clippy --workspace --all-targets --offline --locked -- -D warnings
 cargo test --workspace --release --offline --locked
 make ffi

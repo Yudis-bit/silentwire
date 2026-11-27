@@ -33,8 +33,11 @@ jobs:
       - name: Workspace Check
         run: cargo check --workspace
 
-      - name: No-Default Features Check
-        run: cargo check -p silentwire --no-default-features
+      - name: No-Default Features Check (no_std, no alloc)
+        run: |
+          cargo check -p silentwire --no-default-features
+          cargo test -p silentwire --lib --no-default-features
+          cargo check -p silentwire --no-default-features --features alloc
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -44,6 +47,8 @@ jobs:
 
       - name: C11 / C++17 FFI Verification
         run: |
+          diff -u bindings/include/silentwire.h bindings/silentwire.h
+          diff -u bindings/include/silentwire.h crates/silentwire-ffi/silentwire.h
           make ffi
           cc -std=c11 -pedantic -Wall -Wextra -Werror -x c -fsyntax-only bindings/include/silentwire.h
           c++ -std=c++17 -Wall -Wextra -Werror -x c++ -fsyntax-only bindings/include/silentwire.h

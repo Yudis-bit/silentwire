@@ -139,14 +139,15 @@ Theorem 7: Dual independent additive blinding (HardenedMultiplier)
 ------------------------------------------------------------------
 
 Given secret scalar s and two distinct nonzero blinds b1 != b2 (with
-b1 != s, b2 != s, and b1 != -b2):
+b1 != s, b2 != s, b1 != -b2, and b1 + b2 != s):
 
     s1 = s - b1 (mod n),  P1 = s1 * B + b1 * B
     s2 = s - b2 (mod n),  P2 = s2 * B + b2 * B
 
 Both paths evaluate via GlvScalar::multiply_single_affine without ever invoking
 a point multiplication directly on s. Split scalars are held in Zeroizing
-wrappers, and P1 == P2 is verified in constant time before returning P1.
+wrappers, both resulting points are verified on y^2 = x^3 + 7 (mod p), and
+P1 == P2 is verified in constant time before returning P1.
 
 Architectural and verification boundaries
 -----------------------------------------
