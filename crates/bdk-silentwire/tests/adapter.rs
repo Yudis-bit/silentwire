@@ -567,3 +567,82 @@ fn from_secp_keys_and_scan_block_batch_matches() {
     let reference_matches = scanner.scan_block(&block, &prevouts).unwrap();
     assert_eq!(matches_batch, reference_matches);
 }
+
+#[test]
+fn streaming_skips_p2tr_coinbase_and_rejects_oom_or_nonminimal_compactsize() {
+    use bdk_silentwire::WireError;
+
+    let (mut block, prevouts, scanner, output) = fixture();
+    // Prepend a coinbase paying to a P2TR output (null outpoint has no prevout).
+    let mut cb_script = vec![0x51, 0x20];
+    cb_script.extend_from_slice(&[0x77; 32]);
+    let coinbase = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x03, 0x01, 0x00, 0x00]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(312_500_000),
+            script_pubkey: ScriptBuf::from_bytes(cb_script),
+        }],
+    };
+    block.txdata.insert(0, coinbase);
+
+    let raw = bitcoin::consensus::serialize(&block);
+    let (_, matches_stream) = StreamingBlockScanner::new(&raw)
+        .scan_batch(scanner.receiver(), &prevouts)
+        .expect("coinbase with P2TR output must be skipped");
+    assert_eq!(matches_stream.len(), 1);
+    assert_eq!(matches_stream[0].payment.taproot_pubkey.as_slice(), output);
+
+    // Crafted OOM CompactSize (input_count = 0xffffffff in tiny block) fails closed.
+    let mut crafted_oom = raw[..80].to_vec();
+    crafted_oom.push(0x01); // tx_count = 1
+    crafted_oom.extend_from_slice(&2i32.to_le_bytes()); // version
+    crafted_oom.push(0xfe);
+    crafted_oom.extend_from_slice(&u32::MAX.to_le_bytes()); // huge input_count
+    assert_eq!(
+        StreamingBlockScanner::new(&crafted_oom).scan_batch(scanner.receiver(), &prevouts),
+        Err(WireError::UnexpectedEof)
+    );
+
+    // Non-minimal CompactSize (0xfd 0x01 0x00 for value 1) rejected.
+    let mut non_minimal = raw[..80].to_vec();
+    non_minimal.extend_from_slice(&[0xfd, 0x01, 0x00]);
+    assert_eq!(
+        StreamingBlockScanner::new(&non_minimal).scan_batch(scanner.receiver(), &prevouts),
+        Err(WireError::MalformedCompactSize)
+    );
+}
+
+#[test]
+fn block_batch_scanners_chunk_blocks_exceeding_max_batch() {
+    let (base_block, prevouts, scanner, output) = fixture();
+    let sp_tx = base_block.txdata[0].clone();
+
+    // Build a block with MAX_BATCH + 4 eligible Taproot transactions (4,100 txs).
+    let mut large_block = base_block.clone();
+    let count = silentwire::MAX_BATCH + 4;
+    large_block.txdata = vec![sp_tx; count];
+
+    let found_mem = scanner.scan_block_batch(&large_block, &prevouts).unwrap();
+    assert_eq!(found_mem.len(), count);
+    assert_eq!(
+        found_mem[count - 1].payment.taproot_pubkey.as_slice(),
+        output
+    );
+
+    let raw = bitcoin::consensus::serialize(&large_block);
+    let (_, found_stream) = StreamingBlockScanner::new(&raw)
+        .scan_batch(scanner.receiver(), &prevouts)
+        .unwrap();
+    assert_eq!(found_stream.len(), count);
+    assert_eq!(
+        found_stream[count - 1].payment.taproot_pubkey.as_slice(),
+        output
+    );
+}

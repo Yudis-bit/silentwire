@@ -55,7 +55,10 @@ impl<'a> FastGcsBitReader<'a> {
             }
             let inverted = !self.buffer;
             let ones = (inverted.leading_zeros() as usize).min(self.bits_in_buf);
-            q += ones as u64;
+            q = q.saturating_add(ones as u64);
+            if q >= (1u64 << (64 - BIP158_P)) {
+                return None;
+            }
             if ones < self.bits_in_buf {
                 let consume = ones + 1;
                 if consume >= 64 {

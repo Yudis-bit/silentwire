@@ -48,34 +48,57 @@ pub fn read_compact_size(data: &[u8], cursor: &mut usize) -> Result<usize, WireE
         return Err(WireError::UnexpectedEof);
     }
     let first = data[*cursor];
-    *cursor += 1;
+    *cursor = cursor.checked_add(1).ok_or(WireError::UnexpectedEof)?;
     match first {
-        0..=0xfc => Ok(first as usize),
+        0..=0xfc => Ok(usize::from(first)),
         0xfd => {
-            if *cursor + 2 > data.len() {
+            let end = cursor.checked_add(2).ok_or(WireError::UnexpectedEof)?;
+            if end > data.len() {
                 return Err(WireError::UnexpectedEof);
             }
-            let val = u16::from_le_bytes(data[*cursor..*cursor + 2].try_into().unwrap()) as usize;
-            *cursor += 2;
-            Ok(val)
+            let val = u16::from_le_bytes(data[*cursor..end].try_into().unwrap());
+            if val < 0xfd {
+                return Err(WireError::MalformedCompactSize);
+            }
+            *cursor = end;
+            Ok(usize::from(val))
         }
         0xfe => {
-            if *cursor + 4 > data.len() {
+            let end = cursor.checked_add(4).ok_or(WireError::UnexpectedEof)?;
+            if end > data.len() {
                 return Err(WireError::UnexpectedEof);
             }
-            let val = u32::from_le_bytes(data[*cursor..*cursor + 4].try_into().unwrap()) as usize;
-            *cursor += 4;
-            Ok(val)
+            let val = u32::from_le_bytes(data[*cursor..end].try_into().unwrap());
+            if val <= 0xffff {
+                return Err(WireError::MalformedCompactSize);
+            }
+            *cursor = end;
+            usize::try_from(val).map_err(|_| WireError::UnexpectedEof)
         }
         0xff => {
-            if *cursor + 8 > data.len() {
+            let end = cursor.checked_add(8).ok_or(WireError::UnexpectedEof)?;
+            if end > data.len() {
                 return Err(WireError::UnexpectedEof);
             }
-            let val = u64::from_le_bytes(data[*cursor..*cursor + 8].try_into().unwrap()) as usize;
-            *cursor += 8;
-            Ok(val)
+            let val = u64::from_le_bytes(data[*cursor..end].try_into().unwrap());
+            if val <= 0xffff_ffff {
+                return Err(WireError::MalformedCompactSize);
+            }
+            *cursor = end;
+            usize::try_from(val).map_err(|_| WireError::UnexpectedEof)
         }
     }
+}
+
+#[inline]
+fn advance(cursor: &mut usize, len: usize, limit: usize) -> Result<usize, WireError> {
+    let end = cursor.checked_add(len).ok_or(WireError::UnexpectedEof)?;
+    if end > limit {
+        return Err(WireError::UnexpectedEof);
+    }
+    let start = *cursor;
+    *cursor = end;
+    Ok(start)
 }
 
 pub struct StreamingBlockScanner<'a> {
@@ -97,99 +120,98 @@ impl<'a> StreamingBlockScanner<'a> {
         &self,
         prevouts: &impl PrevoutProvider,
     ) -> Result<(Header, BlockHash, Vec<ParsedTx>), WireError> {
-        let mut cursor = 0;
-        if self.raw.len() < 80 {
+        let total = self.raw.len();
+        if total < 80 {
             return Err(WireError::UnexpectedEof);
         }
         let header_bytes = &self.raw[..80];
         let mut header_reader = header_bytes;
         let header =
             Header::consensus_decode(&mut header_reader).map_err(|_| WireError::MalformedHeader)?;
-        cursor += 80;
+        let mut cursor = 80usize;
 
         let block_hash = BlockHash::from_raw_hash(sha256d::Hash::hash(header_bytes));
         let tx_count = read_compact_size(self.raw, &mut cursor)?;
+        let remaining_for_txs = total.saturating_sub(cursor);
+        // Minimum valid Bitcoin transaction is 10 bytes (4 ver + 1 in + 1 out + 4 locktime).
+        if tx_count > remaining_for_txs / 10 {
+            return Err(WireError::UnexpectedEof);
+        }
         let mut parsed_txs = Vec::new();
 
         for _ in 0..tx_count {
             let tx_start = cursor;
-            if cursor + 4 > self.raw.len() {
-                return Err(WireError::UnexpectedEof);
-            }
-            cursor += 4; // version
+            advance(&mut cursor, 4, total)?; // version
 
             let mut has_witness = false;
-            if cursor + 2 <= self.raw.len()
-                && self.raw[cursor] == 0x00
-                && self.raw[cursor + 1] != 0x00
-            {
+            if cursor.checked_add(2).is_some_and(|end| {
+                end <= total && self.raw[cursor] == 0x00 && self.raw[cursor + 1] == 0x01
+            }) {
                 has_witness = true;
-                cursor += 2; // marker and flag
+                cursor += 2; // BIP-144 marker (0x00) and flag (0x01)
             }
 
             let input_count = read_compact_size(self.raw, &mut cursor)?;
-            let mut raw_inputs = Vec::with_capacity(input_count);
+            let remaining = total.saturating_sub(cursor);
+            // Minimum TxIn is 41 bytes (36 outpoint + 1 script_len + 4 sequence).
+            if input_count > remaining / 41 {
+                return Err(WireError::UnexpectedEof);
+            }
+            let mut raw_inputs = Vec::with_capacity(input_count.min(1024));
 
             for _ in 0..input_count {
-                if cursor + 36 > self.raw.len() {
-                    return Err(WireError::UnexpectedEof);
-                }
-                let outpoint_bytes: [u8; 36] = self.raw[cursor..cursor + 36].try_into().unwrap();
+                let op_start = advance(&mut cursor, 36, total)?;
+                let outpoint_bytes: [u8; 36] =
+                    self.raw[op_start..op_start + 36].try_into().unwrap();
                 let txid = Txid::from_raw_hash(
-                    sha256d::Hash::from_slice(&self.raw[cursor..cursor + 32]).unwrap(),
+                    sha256d::Hash::from_slice(&self.raw[op_start..op_start + 32]).unwrap(),
                 );
                 let vout =
-                    u32::from_le_bytes(self.raw[cursor + 32..cursor + 36].try_into().unwrap());
-                cursor += 36;
+                    u32::from_le_bytes(self.raw[op_start + 32..op_start + 36].try_into().unwrap());
 
                 let script_len = read_compact_size(self.raw, &mut cursor)?;
-                if cursor + script_len > self.raw.len() {
-                    return Err(WireError::UnexpectedEof);
-                }
-                let script_sig = &self.raw[cursor..cursor + script_len];
-                cursor += script_len;
+                let sig_start = advance(&mut cursor, script_len, total)?;
+                let script_sig = &self.raw[sig_start..sig_start + script_len];
 
-                if cursor + 4 > self.raw.len() {
-                    return Err(WireError::UnexpectedEof);
-                }
-                cursor += 4; // sequence
+                advance(&mut cursor, 4, total)?; // sequence
 
                 raw_inputs.push((OutPoint { txid, vout }, outpoint_bytes, script_sig));
             }
 
             let output_count = read_compact_size(self.raw, &mut cursor)?;
+            let remaining = total.saturating_sub(cursor);
+            // Minimum TxOut is 9 bytes (8 value + 1 script_len).
+            if output_count > remaining / 9 {
+                return Err(WireError::UnexpectedEof);
+            }
             let mut taproot_outputs = Vec::new();
 
             for vout in 0..output_count {
-                if cursor + 8 > self.raw.len() {
-                    return Err(WireError::UnexpectedEof);
-                }
-                cursor += 8; // value
+                advance(&mut cursor, 8, total)?; // value
 
                 let script_len = read_compact_size(self.raw, &mut cursor)?;
-                if cursor + script_len > self.raw.len() {
-                    return Err(WireError::UnexpectedEof);
-                }
-                let script_pubkey = &self.raw[cursor..cursor + script_len];
-                cursor += script_len;
+                let spk_start = advance(&mut cursor, script_len, total)?;
+                let script_pubkey = &self.raw[spk_start..spk_start + script_len];
 
                 if let Some(key) = p2tr_key(script_pubkey) {
                     taproot_outputs.push((vout, *key));
                 }
             }
 
-            let mut witness_data = Vec::with_capacity(input_count);
+            let mut witness_data = Vec::with_capacity(input_count.min(1024));
             if has_witness {
                 for _ in 0..input_count {
                     let item_count = read_compact_size(self.raw, &mut cursor)?;
-                    let mut items = Vec::with_capacity(item_count);
+                    let remaining = total.saturating_sub(cursor);
+                    // Each witness stack item needs at least 1 byte for its CompactSize length.
+                    if item_count > remaining {
+                        return Err(WireError::UnexpectedEof);
+                    }
+                    let mut items = Vec::with_capacity(item_count.min(64));
                     for _ in 0..item_count {
                         let item_len = read_compact_size(self.raw, &mut cursor)?;
-                        if cursor + item_len > self.raw.len() {
-                            return Err(WireError::UnexpectedEof);
-                        }
-                        items.push(&self.raw[cursor..cursor + item_len]);
-                        cursor += item_len;
+                        let item_start = advance(&mut cursor, item_len, total)?;
+                        items.push(&self.raw[item_start..item_start + item_len]);
                     }
                     witness_data.push(items);
                 }
@@ -197,12 +219,10 @@ impl<'a> StreamingBlockScanner<'a> {
                 witness_data.resize_with(input_count, Vec::new);
             }
 
-            if cursor + 4 > self.raw.len() {
-                return Err(WireError::UnexpectedEof);
-            }
-            cursor += 4; // locktime
+            advance(&mut cursor, 4, total)?; // locktime
 
-            if taproot_outputs.is_empty() {
+            let is_coinbase = raw_inputs.len() == 1 && raw_inputs[0].0.is_null();
+            if is_coinbase || taproot_outputs.is_empty() {
                 continue;
             }
 
@@ -218,18 +238,18 @@ impl<'a> StreamingBlockScanner<'a> {
                     .unwrap();
                 legacy.extend_from_slice(&in_count_bytes);
                 for _ in 0..legacy_in_count {
-                    legacy.extend_from_slice(&self.raw[in_cursor..in_cursor + 36]);
-                    in_cursor += 36;
+                    let s = advance(&mut in_cursor, 36, total)?;
+                    legacy.extend_from_slice(&self.raw[s..s + 36]);
                     let slen = read_compact_size(self.raw, &mut in_cursor)?;
                     let mut slen_bytes = Vec::new();
                     bitcoin::VarInt(slen as u64)
                         .consensus_encode(&mut slen_bytes)
                         .unwrap();
                     legacy.extend_from_slice(&slen_bytes);
-                    legacy.extend_from_slice(&self.raw[in_cursor..in_cursor + slen]);
-                    in_cursor += slen;
-                    legacy.extend_from_slice(&self.raw[in_cursor..in_cursor + 4]);
-                    in_cursor += 4;
+                    let s = advance(&mut in_cursor, slen, total)?;
+                    legacy.extend_from_slice(&self.raw[s..s + slen]);
+                    let s = advance(&mut in_cursor, 4, total)?;
+                    legacy.extend_from_slice(&self.raw[s..s + 4]);
                 }
                 let mut out_cursor = in_cursor;
                 let legacy_out_count = read_compact_size(self.raw, &mut out_cursor)?;
@@ -239,16 +259,16 @@ impl<'a> StreamingBlockScanner<'a> {
                     .unwrap();
                 legacy.extend_from_slice(&out_count_bytes);
                 for _ in 0..legacy_out_count {
-                    legacy.extend_from_slice(&self.raw[out_cursor..out_cursor + 8]);
-                    out_cursor += 8;
+                    let s = advance(&mut out_cursor, 8, total)?;
+                    legacy.extend_from_slice(&self.raw[s..s + 8]);
                     let slen = read_compact_size(self.raw, &mut out_cursor)?;
                     let mut slen_bytes = Vec::new();
                     bitcoin::VarInt(slen as u64)
                         .consensus_encode(&mut slen_bytes)
                         .unwrap();
                     legacy.extend_from_slice(&slen_bytes);
-                    legacy.extend_from_slice(&self.raw[out_cursor..out_cursor + slen]);
-                    out_cursor += slen;
+                    let s = advance(&mut out_cursor, slen, total)?;
+                    legacy.extend_from_slice(&self.raw[s..s + slen]);
                 }
                 legacy.extend_from_slice(&self.raw[cursor - 4..cursor]); // locktime
                 Txid::from_raw_hash(sha256d::Hash::hash(&legacy))
@@ -328,25 +348,28 @@ impl<'a> StreamingBlockScanner<'a> {
             return Ok((header, Vec::new()));
         }
 
-        let prepared_list: Vec<silentwire::input::PreparedTransaction> =
-            parsed_txs.iter().map(|tx| tx.prepared.clone()).collect();
-        let outputs_storage: Vec<Vec<[u8; 32]>> = parsed_txs
-            .iter()
-            .map(|tx| tx.taproot_outputs.iter().map(|(_, k)| *k).collect())
-            .collect();
-        let outputs_refs: Vec<&[[u8; 32]]> = outputs_storage.iter().map(|k| k.as_slice()).collect();
-
-        scanner.scan_batch_into(&prepared_list, &outputs_refs, ctx)?;
         let mut found = Vec::new();
+        for chunk in parsed_txs.chunks(silentwire::MAX_BATCH) {
+            let prepared_list: Vec<silentwire::input::PreparedTransaction> =
+                chunk.iter().map(|tx| tx.prepared.clone()).collect();
+            let outputs_storage: Vec<Vec<[u8; 32]>> = chunk
+                .iter()
+                .map(|tx| tx.taproot_outputs.iter().map(|(_, k)| *k).collect())
+                .collect();
+            let outputs_refs: Vec<&[[u8; 32]]> =
+                outputs_storage.iter().map(|k| k.as_slice()).collect();
 
-        for (tx, list) in parsed_txs.into_iter().zip(ctx.drain_results()) {
-            for mut payment in list {
-                payment.output_index = tx.taproot_outputs[payment.output_index as usize].0 as u32;
-                found.push(BlockMatch {
-                    block_hash,
-                    txid: tx.txid,
-                    payment,
-                });
+            scanner.scan_batch_into(&prepared_list, &outputs_refs, ctx)?;
+            for (tx, list) in chunk.iter().zip(ctx.drain_results()) {
+                for mut payment in list {
+                    payment.output_index =
+                        tx.taproot_outputs[payment.output_index as usize].0 as u32;
+                    found.push(BlockMatch {
+                        block_hash,
+                        txid: tx.txid,
+                        payment,
+                    });
+                }
             }
         }
 
@@ -378,10 +401,11 @@ impl<'a> BlkStreamScanner<'a> {
         scanner: &SpScannerNaive,
         prevouts: &impl PrevoutProvider,
     ) -> Result<Vec<(Header, Vec<BlockMatch>)>, WireError> {
-        let mut cursor = 0;
+        let mut cursor = 0usize;
+        let total = self.data.len();
         let mut results = Vec::new();
         let mut ctx = silentwire::ScanContext::with_capacity(1024, 1);
-        while cursor + 8 <= self.data.len() {
+        while cursor.checked_add(8).is_some_and(|end| end <= total) {
             if self.data[cursor..cursor + 4] != self.magic {
                 cursor += 1;
                 continue;
@@ -390,11 +414,8 @@ impl<'a> BlkStreamScanner<'a> {
             let block_len =
                 u32::from_le_bytes(self.data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
-            if cursor + block_len > self.data.len() {
-                return Err(WireError::UnexpectedEof);
-            }
-            let block_bytes = &self.data[cursor..cursor + block_len];
-            cursor += block_len;
+            let block_start = advance(&mut cursor, block_len, total)?;
+            let block_bytes = &self.data[block_start..block_start + block_len];
             let block_scanner = StreamingBlockScanner::new(block_bytes);
             let (header, matches) =
                 block_scanner.scan_batch_with_context(scanner, prevouts, &mut ctx)?;
@@ -409,9 +430,10 @@ impl<'a> BlkStreamScanner<'a> {
         prevouts: &(impl PrevoutProvider + Sync),
         thread_count: usize,
     ) -> Result<Vec<(Header, Vec<BlockMatch>)>, WireError> {
-        let mut cursor = 0;
+        let mut cursor = 0usize;
+        let total = self.data.len();
         let mut blocks = Vec::new();
-        while cursor + 8 <= self.data.len() {
+        while cursor.checked_add(8).is_some_and(|end| end <= total) {
             if self.data[cursor..cursor + 4] != self.magic {
                 cursor += 1;
                 continue;
@@ -420,11 +442,8 @@ impl<'a> BlkStreamScanner<'a> {
             let block_len =
                 u32::from_le_bytes(self.data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
-            if cursor + block_len > self.data.len() {
-                return Err(WireError::UnexpectedEof);
-            }
-            blocks.push(&self.data[cursor..cursor + block_len]);
-            cursor += block_len;
+            let block_start = advance(&mut cursor, block_len, total)?;
+            blocks.push(&self.data[block_start..block_start + block_len]);
         }
 
         if blocks.is_empty() {

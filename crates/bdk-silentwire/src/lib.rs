@@ -76,13 +76,19 @@ pub struct TrackedPayment {
     pub payment: SilentPaymentMatch,
 }
 
+/// Derives the BIP-352 Taproot spending key `b_spend + tweak (mod n)` with
+/// automatic zeroization of intermediate scalars. Callers should wrap the
+/// returned key bytes in `silentwire::zeroize::Zeroizing`.
 pub fn derive_spending_key(
     spend_priv_key: [u8; 32],
     private_key_tweak: [u8; 32],
 ) -> Result<[u8; 32], Error> {
-    let b_spend = silentwire::scalar(spend_priv_key)?;
-    let tweak = silentwire::scalar(private_key_tweak)?;
-    let total = b_spend + tweak;
+    use silentwire::zeroize::Zeroizing;
+    let spend_bytes = Zeroizing::new(spend_priv_key);
+    let tweak_bytes = Zeroizing::new(private_key_tweak);
+    let b_spend = Zeroizing::new(silentwire::scalar(*spend_bytes)?);
+    let tweak = Zeroizing::new(silentwire::scalar(*tweak_bytes)?);
+    let total = Zeroizing::new(*b_spend + *tweak);
     if bool::from(total.is_zero()) {
         return Err(Error::InvalidScalar);
     }
@@ -203,8 +209,9 @@ impl SpScanner {
         self.scan_block_batch_with_context(block, prevouts, &mut ctx)
     }
 
-    /// Scans a block using Montgomery batch normalization across all transactions
-    /// and a caller-provided ScanContext, achieving zero heap allocations.
+    /// Scans a block using Montgomery batch normalization across all eligible
+    /// transactions, reusing the caller's ScanContext workspace and chunking
+    /// blocks that exceed `silentwire::MAX_BATCH`.
     pub fn scan_block_batch_with_context(
         &self,
         block: &Block,
@@ -263,21 +270,28 @@ impl SpScanner {
             return Ok(Vec::new());
         }
 
-        let outputs_refs: Vec<&[[u8; 32]]> = outputs_storage.iter().map(|k| k.as_slice()).collect();
-        self.receiver
-            .scan_batch_into(&prepared_list, &outputs_refs, ctx)?;
-
         let mut found = Vec::new();
         let block_hash = block.block_hash();
-        for ((txid, indexed), list) in parsed_txs.into_iter().zip(ctx.drain_results()) {
-            for mut payment in list {
-                payment.output_index = indexed[payment.output_index as usize].0 as u32;
-                found.push(BlockMatch {
-                    block_hash,
-                    txid,
-                    payment,
-                });
+        let mut offset = 0usize;
+        while offset < prepared_list.len() {
+            let end = (offset + silentwire::MAX_BATCH).min(prepared_list.len());
+            let outputs_refs: Vec<&[[u8; 32]]> = outputs_storage[offset..end]
+                .iter()
+                .map(|k| k.as_slice())
+                .collect();
+            self.receiver
+                .scan_batch_into(&prepared_list[offset..end], &outputs_refs, ctx)?;
+            for ((txid, indexed), list) in parsed_txs[offset..end].iter().zip(ctx.drain_results()) {
+                for mut payment in list {
+                    payment.output_index = indexed[payment.output_index as usize].0 as u32;
+                    found.push(BlockMatch {
+                        block_hash,
+                        txid: *txid,
+                        payment,
+                    });
+                }
             }
+            offset = end;
         }
         Ok(found)
     }

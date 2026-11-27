@@ -1,11 +1,9 @@
 use crate::filter::FastGcsFilterMatcher;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use silentwire::input::PreparedTransaction;
-use silentwire::k256::{AffinePoint, ProjectivePoint, Scalar};
+use silentwire::k256::AffinePoint;
 use silentwire::{
-    audit_candidate_tweak, is_on_quadratic_twist, Error as SpError, SilentPaymentMatch,
-    SpScannerNaive,
+    is_on_quadratic_twist, point, Error as SpError, ScanContext, SilentPaymentMatch, SpScannerNaive,
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -214,14 +212,17 @@ impl CompactTweakBlock {
             if !matches!(pt[0], 2 | 3) {
                 return Err(CtisError::MalformedPoint(i));
             }
-            let x: [u8; 32] = pt[1..33]
-                .try_into()
-                .map_err(|_| CtisError::MalformedPoint(i))?;
-            if is_on_quadratic_twist(&x) {
-                return Err(CtisError::TwistPointDetected(i));
+            if let Ok(affine) = point(pt) {
+                points.push(affine);
+            } else {
+                let x: [u8; 32] = pt[1..33]
+                    .try_into()
+                    .map_err(|_| CtisError::MalformedPoint(i))?;
+                if is_on_quadratic_twist(&x) {
+                    return Err(CtisError::TwistPointDetected(i));
+                }
+                return Err(CtisError::MalformedPoint(i));
             }
-            let affine = audit_candidate_tweak(pt).map_err(|_| CtisError::MalformedPoint(i))?;
-            points.push(affine);
         }
         Ok(points)
     }
@@ -248,15 +249,16 @@ impl CompactTweakBlock {
             return Err(CtisError::Arithmetic(SpError::ScratchTooSmall));
         }
 
-        let prepared: Vec<PreparedTransaction> = points
-            .into_iter()
-            .map(|affine| PreparedTransaction {
-                aggregate: affine,
-                input_hash: Scalar::ONE,
-                tweak: ProjectivePoint::from(affine),
-            })
-            .collect();
-        let all_matches = scanner.scan_batch_glv(&prepared, outputs_per_tweak)?;
+        let mut all_matches = Vec::with_capacity(points.len());
+        let mut ctx = ScanContext::default();
+        for (pt_chunk, out_chunk) in points
+            .chunks(silentwire::MAX_BATCH)
+            .zip(outputs_per_tweak.chunks(silentwire::MAX_BATCH))
+        {
+            scanner
+                .scan_affine_batch_glv_with_declassify_into(pt_chunk, out_chunk, &mut ctx, None)?;
+            all_matches.extend(ctx.drain_results());
+        }
         Ok(all_matches)
     }
 }
