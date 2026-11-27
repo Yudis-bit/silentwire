@@ -234,10 +234,11 @@ mod tests {
             (b"BIP0374/challenge".as_slice(), MIDSTATE_BIP374_CHALLENGE),
         ] {
             for len in [0usize, 1, 32, 55, 56, 63, 64, 65, 128, 199] {
-                let msg = alloc::vec![0xab; len];
+                let buf = [0xabu8; 199];
+                let msg = &buf[..len];
                 assert_eq!(
-                    tagged_hash_midstate(mid, &[&msg]),
-                    tagged_hash(tag, &[&msg]),
+                    tagged_hash_midstate(mid, &[msg]),
+                    tagged_hash(tag, &[msg]),
                     "mismatch for len {len}"
                 );
             }

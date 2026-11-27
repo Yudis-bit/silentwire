@@ -20,13 +20,13 @@ keywords = ["bitcoin", "silent-payments", "bip352", "cryptography", "privacy"]
 categories = ["cryptography::cryptocurrencies", "no-std"]
 
 [workspace.dependencies]
-k256 = { version = "=0.13.4", default-features = false, features = ["arithmetic", "alloc", "expose-field"] }
-sha2 = { version = "=0.10.9", default-features = false, features = ["compress"] }
-bitcoin_hashes = { version = "=0.14.101", default-features = false }
-subtle = { version = "=2.6.1", default-features = false }
-zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
-silentwire = { path = "crates/silentwire", version = "=0.1.0", default-features = false }
-bdk-silentwire = { path = "crates/bdk-silentwire", version = "=0.1.0" }
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "expose-field"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["compress"] }
+bitcoin_hashes = { version = "0.14.101", default-features = false }
+subtle = { version = "2.6.1", default-features = false }
+zeroize = { version = "1.8.2", default-features = false }
+silentwire = { path = "crates/silentwire", version = "0.1.0", default-features = false }
+bdk-silentwire = { path = "crates/bdk-silentwire", version = "0.1.0" }
 
 [workspace.lints.rust]
 warnings = "deny"

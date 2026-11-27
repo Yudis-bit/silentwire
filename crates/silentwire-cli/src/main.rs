@@ -90,13 +90,15 @@ fn run_scan_blk(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let scan_priv_hex = scan_priv.ok_or("Missing required --scan-priv <hex>")?;
     let spend_pub_hex = spend_pub.ok_or("Missing required --spend-pub <hex>")?;
 
-    let scan_bytes: [u8; 32] = hex::decode(scan_priv_hex)?
-        .try_into()
-        .map_err(|_| "Invalid scan key")?;
+    let scan_bytes: silentwire::zeroize::Zeroizing<[u8; 32]> = silentwire::zeroize::Zeroizing::new(
+        hex::decode(scan_priv_hex)?
+            .try_into()
+            .map_err(|_| "Invalid scan key")?,
+    );
     let spend_bytes: [u8; 33] = hex::decode(spend_pub_hex)?
         .try_into()
         .map_err(|_| "Invalid spend pubkey")?;
-    let scanner = SpScannerNaive::new(scan_bytes, spend_bytes, &[])?;
+    let scanner = SpScannerNaive::new(*scan_bytes, spend_bytes, &[])?;
 
     let prevouts = match prevouts_path {
         Some(ref p) => load_prevouts(p)?,
@@ -131,13 +133,14 @@ fn run_scan_blk(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let mb = data.len() as f64 / 1_000_000.0;
     let sec = elapsed.as_secs_f64();
+    let speed = if sec > 0.0 { mb / sec } else { 0.0 };
     println!(
         "summary,blocks={},matches={},bytes={},seconds={:.4},speed_mbs={:.2},threads={}",
         results.len(),
         match_count,
         data.len(),
         sec,
-        mb / sec,
+        speed,
         threads
     );
     Ok(())
@@ -245,10 +248,11 @@ fn run_verify_vectors(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                 }
-                let mut outputs: Vec<_> = create_outputs(&secrets, &outpoints, &recipients)?
-                    .iter()
-                    .map(hex::encode)
-                    .collect();
+                let mut outputs: Vec<_> = match create_outputs(&secrets, &outpoints, &recipients) {
+                    Ok(list) => list.iter().map(hex::encode).collect(),
+                    Err(silentwire::Error::BatchTooLarge) => Vec::new(),
+                    Err(err) => return Err(err.into()),
+                };
                 outputs.sort();
                 assert!(expected["outputs"].as_array().unwrap().iter().any(|set| {
                     let mut s: Vec<_> = set

@@ -5,7 +5,7 @@ use crate::{
     input::PreparedTransaction,
     point, scalar,
     ssmb::{batch_normalize_projective_into, GlvScalar, GLV_FUSED_BASES},
-    Error, K_MAX,
+    BlockPaymentMatch, Error, SilentPaymentMatch, K_MAX,
 };
 use alloc::{vec, vec::Vec};
 use k256::{AffinePoint, FieldElement, ProjectivePoint, Scalar};
@@ -15,15 +15,6 @@ use zeroize::{Zeroize, Zeroizing};
 /// x-match, `O(L)`) and Mode B (subtractive BIP-352 `±P_tx - P_0` lookup, `O(1)`).
 pub const ADAPTIVE_LABEL_THRESHOLD: usize = 8;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SilentPaymentMatch {
-    pub output_index: u32,
-    pub derivation_index: u32,
-    pub taproot_pubkey: [u8; 32],
-    pub tweak_scalar: [u8; 32],
-    pub label: Option<u32>,
-}
-
 /// Transaction association is explicit. The tweak must already be h*A_sum.
 #[derive(Clone, Copy)]
 pub struct ScanTransaction<'a> {
@@ -31,10 +22,10 @@ pub struct ScanTransaction<'a> {
     pub outputs: &'a [[u8; 32]],
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct BlockPaymentMatch {
-    pub transaction_index: usize,
-    pub payment: SilentPaymentMatch,
+fn zeroize_affines(points: &mut [Affine]) {
+    for pt in points {
+        pt.zeroize_coords();
+    }
 }
 
 #[derive(Clone)]
@@ -116,7 +107,7 @@ impl ScanContext {
         if outputs.len() > crate::MAX_BATCH {
             return Err(Error::BatchTooLarge);
         }
-        let shared = GlvScalar::new(&scan)
+        let mut shared = GlvScalar::new(&scan)
             .multiply_single_affine(&tweak)
             .to_affine();
         let variants = [SpendVariant {
@@ -126,6 +117,7 @@ impl ScanContext {
             label: None,
         }];
         let result = self.scan_shared_coord_into(&shared, &variants, &[], outputs, matches);
+        shared.zeroize_coords();
         self.erase_workspace();
         result
     }
@@ -195,7 +187,7 @@ impl ScanContext {
             let base_tx_index = chunk_idx * GLV_FUSED_BASES;
             for (rel, tx) in tx_chunk.iter().enumerate() {
                 let tx_index = base_tx_index + rel;
-                self.scan_shared_coord_visit(
+                let res = self.scan_shared_coord_visit(
                     &shareds[rel],
                     &variants,
                     &[],
@@ -208,8 +200,17 @@ impl ScanContext {
                         });
                         Ok(())
                     },
-                )?;
+                );
+                if let Err(err) = res {
+                    zeroize_affines(&mut shareds[..chunk_len]);
+                    for item in &mut result {
+                        item.zeroize();
+                    }
+                    self.erase_workspace();
+                    return Err(err);
+                }
             }
+            zeroize_affines(&mut shareds[..chunk_len]);
         }
         self.erase_workspace();
         Ok(result)
@@ -272,14 +273,15 @@ impl ScanContext {
                     },
                 );
                 if let Err(error) = res {
+                    zeroize_affines(&mut shareds[..chunk_len]);
                     for item in &mut matches[..written] {
-                        item.payment.tweak_scalar.zeroize();
-                        *item = BlockPaymentMatch::default();
+                        item.zeroize();
                     }
                     self.erase_workspace();
                     return Err(error);
                 }
             }
+            zeroize_affines(&mut shareds[..chunk_len]);
         }
         self.erase_workspace();
         Ok(written)
@@ -504,6 +506,14 @@ pub struct SpScannerNaive {
     glv: GlvScalar,
     variants: Vec<SpendVariant>,
     label_lookup: Vec<([u8; 33], usize)>,
+}
+
+impl Drop for SpScannerNaive {
+    fn drop(&mut self) {
+        for v in &mut self.variants {
+            v.tweak.zeroize();
+        }
+    }
 }
 
 impl SpScannerNaive {
@@ -765,12 +775,17 @@ impl SpScannerNaive {
                     },
                 );
                 if let Err(e) = res {
+                    zeroize_affines(&mut shareds[..chunk_len]);
+                    for item in &mut slot {
+                        item.zeroize();
+                    }
                     slot.clear();
                     ctx.results[base_idx + rel] = slot;
                     return Err(e);
                 }
                 ctx.results[base_idx + rel] = slot;
             }
+            zeroize_affines(&mut shareds[..chunk_len]);
         }
 
         ctx.erase_workspace();
@@ -840,12 +855,17 @@ impl SpScannerNaive {
                     },
                 );
                 if let Err(e) = res {
+                    zeroize_affines(&mut shareds[..chunk_len]);
+                    for item in &mut slot {
+                        item.zeroize();
+                    }
                     slot.clear();
                     ctx.results[base_idx + rel] = slot;
                     return Err(e);
                 }
                 ctx.results[base_idx + rel] = slot;
             }
+            zeroize_affines(&mut shareds[..chunk_len]);
         }
 
         ctx.erase_workspace();
@@ -899,14 +919,20 @@ impl SpScannerNaive {
             let base_idx = chunk_idx * GLV_FUSED_BASES;
             for rel in 0..chunk_len {
                 let tx_idx = base_idx + rel;
-                ctx.scan_shared_coord_visit(
+                let res = ctx.scan_shared_coord_visit(
                     &shareds[rel],
                     &self.variants,
                     &self.label_lookup,
                     out_chunk[rel],
                     |payment| visit(tx_idx, payment),
-                )?;
+                );
+                if let Err(e) = res {
+                    zeroize_affines(&mut shareds[..chunk_len]);
+                    ctx.erase_workspace();
+                    return Err(e);
+                }
             }
+            zeroize_affines(&mut shareds[..chunk_len]);
         }
 
         ctx.erase_workspace();
@@ -932,7 +958,8 @@ impl SpScannerNaive {
         let encoded = Zeroizing::new(compressed(shared)?);
         let mut scripts = Vec::new();
         for k in 0..max_k {
-            let tweak = scalar(tagged_hash_shared_secret(&encoded, k))?;
+            let tweak_bytes = Zeroizing::new(tagged_hash_shared_secret(&encoded, k));
+            let tweak = Zeroizing::new(scalar(*tweak_bytes)?);
             let tweak_point = crate::comb::multiply_generator(&tweak);
             for variant in &self.variants {
                 if let Ok(candidate) = compressed(&(tweak_point + variant.point).to_affine()) {
@@ -960,12 +987,18 @@ impl SpScannerNaive {
         batch_normalize_projective_into(&proj_bases, &mut aff_bases);
         let coord_bases: Vec<Affine> = aff_bases.iter().map(Affine::from_k256).collect();
         let mut shareds = vec![Affine::identity(); coord_bases.len()];
-        self.glv
-            .multiply_affine_batch_to_affine(&coord_bases, &mut shareds)?;
         let mut all_scripts = Vec::new();
-        for shared in &shareds {
-            let mut s = self.derive_candidate_scripts_for_shared(&shared.to_k256(), max_k)?;
-            all_scripts.append(&mut s);
+        for (coord_chunk, shared_chunk) in coord_bases
+            .chunks(crate::MAX_BATCH)
+            .zip(shareds.chunks_mut(crate::MAX_BATCH))
+        {
+            self.glv
+                .multiply_affine_batch_to_affine(coord_chunk, shared_chunk)?;
+            for shared in shared_chunk.iter() {
+                let mut s = self.derive_candidate_scripts_for_shared(&shared.to_k256(), max_k)?;
+                all_scripts.append(&mut s);
+            }
+            zeroize_affines(shared_chunk);
         }
         Ok(all_scripts)
     }

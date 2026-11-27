@@ -1,7 +1,12 @@
-use crate::{compressed, scalar, tagged_hash, Error, K_MAX};
+#[cfg(feature = "alloc")]
+use crate::{compressed, tagged_hash, K_MAX};
+use crate::{scalar, Error};
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+#[cfg(feature = "alloc")]
+use k256::elliptic_curve::group::Group;
 use k256::{
-    elliptic_curve::{group::Group, ops::MulByGenerator, point::AffineCoordinates},
+    elliptic_curve::{ops::MulByGenerator, point::AffineCoordinates},
     AffinePoint, ProjectivePoint, Scalar,
 };
 use subtle::ConditionallySelectable;
@@ -64,6 +69,7 @@ pub fn aggregate_secret(inputs: &[SenderInput]) -> Result<Scalar, Error> {
 /// key ahead of a receiver's spend key hides subsequent outputs in that group
 /// (including the sender's own `m = 0` change output). Callers batching
 /// recipients or emitting BIP-352 change should use [`create_outputs_checked`].
+#[cfg(feature = "alloc")]
 pub fn create_outputs(
     inputs: &[SenderInput],
     outpoints: &[[u8; 36]],
@@ -86,9 +92,10 @@ pub fn create_outputs(
             .count()
             > K_MAX as usize
         {
-            return Ok(Vec::new());
+            return Err(Error::BatchTooLarge);
         }
     }
+    let partial = Zeroizing::new(hash * *sum);
     let mut outputs = Vec::with_capacity(recipients.len());
     for (index, recipient) in recipients.iter().enumerate() {
         if bool::from(ProjectivePoint::from(recipient.scan).is_identity())
@@ -100,14 +107,14 @@ pub fn create_outputs(
             .iter()
             .filter(|r| r.scan == recipient.scan)
             .count() as u32;
-        let shared = (ProjectivePoint::from(recipient.scan) * (hash * *sum)).to_affine();
+        let shared = (ProjectivePoint::from(recipient.scan) * *partial).to_affine();
         let encoded = Zeroizing::new(compressed(&shared)?);
-        let tweak = scalar(tagged_hash(
+        let tweak = Zeroizing::new(scalar(tagged_hash(
             b"BIP0352/SharedSecret",
             &[encoded.as_ref(), &k.to_be_bytes()],
-        ))?;
+        ))?);
         let destination = (ProjectivePoint::from(recipient.spend)
-            + ProjectivePoint::mul_by_generator(&tweak))
+            + ProjectivePoint::mul_by_generator(&*tweak))
         .to_affine();
         outputs.push(
             compressed(&destination)?[1..]
@@ -126,6 +133,7 @@ pub fn create_outputs(
 /// key with different `spend` keys, permits identical `(scan, spend)` pairs
 /// and same-party labels, and assigns lower `k` (`0..r`) to `OwnVerified`
 /// entries ahead of `External` entries so self-change remains recoverable.
+#[cfg(feature = "alloc")]
 pub fn create_outputs_checked(
     inputs: &[SenderInput],
     outpoints: &[[u8; 36]],

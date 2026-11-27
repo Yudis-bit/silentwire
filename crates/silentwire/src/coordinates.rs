@@ -94,6 +94,22 @@ impl Affine {
         out[1..].copy_from_slice(&x_norm.to_bytes());
         Ok(out)
     }
+
+    #[inline]
+    pub(crate) fn is_on_curve(&self) -> Choice {
+        let lhs = self.y.square();
+        let rhs = self.x.square().mul(&self.x) + FieldElement::from(7u64);
+        let diff = lhs + rhs.negate(2);
+        !self.infinity & diff.normalizes_to_zero()
+    }
+
+    #[inline]
+    pub(crate) fn zeroize_coords(&mut self) {
+        use zeroize::Zeroize;
+        self.x.zeroize();
+        self.y.zeroize();
+        self.infinity = Choice::from(1);
+    }
 }
 
 impl ConditionallySelectable for Affine {
@@ -116,6 +132,7 @@ pub(crate) fn parse_x_only(bytes: &[u8; 32]) -> Option<FieldElement> {
 
 /// Lifts a canonical x-only 32-byte coordinate to the even-`y` secp256k1 point.
 /// Returns `None` for `x >= p` or any off-curve / quadratic twist x-coordinate.
+#[cfg(any(feature = "alloc", test))]
 #[inline]
 pub(crate) fn lift_x_k256(x_bytes: &[u8; 32]) -> Option<AffinePoint> {
     let mut encoded = [0u8; 33];
@@ -279,6 +296,7 @@ impl JacobianPoint {
 
     /// Zero-inversion Jacobian x-coordinate match:
     /// checks `Z != 0` and `X == x_out * Z^2 (mod p)`.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn matches_x(&self, x_out: &FieldElement) -> Choice {
         let (z2, non_infinity) = self.match_z2();

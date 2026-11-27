@@ -220,11 +220,23 @@ fn all_34_official_sending_cases() {
                     });
                 }
             }
-            let mut outputs: Vec<_> = create_outputs(&secrets, &outpoints, &recipients)
-                .unwrap()
+            let max_group = recipients
                 .iter()
-                .map(hex::encode)
-                .collect();
+                .map(|r| recipients.iter().filter(|o| o.scan == r.scan).count())
+                .max()
+                .unwrap_or(0);
+            let outputs_res = create_outputs(&secrets, &outpoints, &recipients);
+            let mut outputs: Vec<_> = if max_group > silentwire::K_MAX as usize {
+                assert_eq!(
+                    outputs_res,
+                    Err(silentwire::Error::BatchTooLarge),
+                    "exceeding K_MAX must fail closed: {}",
+                    case["comment"]
+                );
+                Vec::new()
+            } else {
+                outputs_res.unwrap().iter().map(hex::encode).collect()
+            };
             outputs.sort();
             assert!(
                 expected["outputs"].as_array().unwrap().iter().any(|set| {
@@ -244,4 +256,68 @@ fn all_34_official_sending_cases() {
         }
     }
     assert_eq!(count, 34);
+}
+
+#[test]
+fn rejects_spoofed_witness_pubkey_in_p2wpkh_and_nested_p2sh_p2wpkh() {
+    use bitcoin_hashes::{hash160, Hash};
+    use silentwire::k256::{ProjectivePoint, Scalar};
+
+    let real_pk =
+        compressed(&(ProjectivePoint::GENERATOR * Scalar::from(17u64)).to_affine()).unwrap();
+    let spoof_pk =
+        compressed(&(ProjectivePoint::GENERATOR * Scalar::from(19u64)).to_affine()).unwrap();
+    let real_hash = hash160::Hash::hash(&real_pk);
+
+    // Native P2WPKH: 0x00 0x14 <20-byte hash160(real_pk)>
+    let mut wpkh_spk = vec![0x00u8, 0x14];
+    wpkh_spk.extend_from_slice(real_hash.as_byte_array());
+
+    let valid_wpkh = ValidatedInput {
+        outpoint: [0u8; 36],
+        prevout_script: &wpkh_spk,
+        script_sig: &[],
+        witness: &[b"sig", &real_pk],
+    };
+    assert_eq!(
+        extract_key(&valid_wpkh).unwrap(),
+        Some(point(&real_pk).unwrap())
+    );
+
+    let spoofed_wpkh = ValidatedInput {
+        outpoint: [0u8; 36],
+        prevout_script: &wpkh_spk,
+        script_sig: &[],
+        witness: &[b"sig", &spoof_pk],
+    };
+    assert_eq!(extract_key(&spoofed_wpkh).unwrap(), None);
+
+    // Nested P2SH-P2WPKH: scriptSig = [0x16, 0x00, 0x14, hash160(real_pk)]
+    let mut redeem = vec![0x00u8, 0x14];
+    redeem.extend_from_slice(real_hash.as_byte_array());
+    let redeem_hash = hash160::Hash::hash(&redeem);
+    let mut p2sh_spk = vec![0xa9u8, 0x14];
+    p2sh_spk.extend_from_slice(redeem_hash.as_byte_array());
+    p2sh_spk.push(0x87);
+    let mut script_sig = vec![0x16u8];
+    script_sig.extend_from_slice(&redeem);
+
+    let valid_nested = ValidatedInput {
+        outpoint: [0u8; 36],
+        prevout_script: &p2sh_spk,
+        script_sig: &script_sig,
+        witness: &[b"sig", &real_pk],
+    };
+    assert_eq!(
+        extract_key(&valid_nested).unwrap(),
+        Some(point(&real_pk).unwrap())
+    );
+
+    let spoofed_nested = ValidatedInput {
+        outpoint: [0u8; 36],
+        prevout_script: &p2sh_spk,
+        script_sig: &script_sig,
+        witness: &[b"sig", &spoof_pk],
+    };
+    assert_eq!(extract_key(&spoofed_nested).unwrap(), None);
 }

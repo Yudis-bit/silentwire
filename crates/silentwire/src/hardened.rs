@@ -1,4 +1,4 @@
-use crate::{compressed, coordinates::Affine, point, scalar, ssmb::GlvScalar, tagged_hash, Error};
+use crate::{coordinates::Affine, point, scalar, ssmb::GlvScalar, tagged_hash, Error};
 use k256::elliptic_curve::Group;
 use k256::{AffinePoint, FieldElement, ProjectivePoint, Scalar};
 use subtle::ConstantTimeEq;
@@ -18,15 +18,9 @@ pub fn is_on_quadratic_twist(x_bytes: &[u8; 32]) -> bool {
 }
 
 /// Audits a compressed 33-byte candidate tweak point against twist leakage
-/// and standard SEC1 curve validation. Rejects fail-closed on twist points.
+/// and standard SEC1 curve validation in a single decompression pass.
+/// Rejects fail-closed on twist points, non-canonical coordinates, and infinity.
 pub fn audit_candidate_tweak(bytes: &[u8; 33]) -> Result<AffinePoint, Error> {
-    if !matches!(bytes[0], 2 | 3) {
-        return Err(Error::InvalidPoint);
-    }
-    let x: [u8; 32] = bytes[1..33].try_into().map_err(|_| Error::InvalidPoint)?;
-    if is_on_quadratic_twist(&x) {
-        return Err(Error::InvalidPoint);
-    }
     point(bytes)
 }
 
@@ -53,8 +47,9 @@ pub struct HardenedMultiplier;
 
 impl HardenedMultiplier {
     /// Computes `Q = secret_scalar * base_point` using two independent blinded
-    /// additive splits (`s = s1 + s2` and `s = s3 + s4`, `s1 != s3`), deriving the
-    /// second blinding scalar via domain-separated hashing of `blinding_scalar`.
+    /// additive splits (`s = s1 + s2` and `s = s3 + s4`, `s1 != s3`, `s1 != -s3`,
+    /// `s1 + s3 != s`), deriving the second blinding scalar via domain-separated
+    /// hashing of `blinding_scalar`.
     pub fn multiply_hardened(
         secret_scalar: &Scalar,
         base_point: &ProjectivePoint,
@@ -71,52 +66,7 @@ impl HardenedMultiplier {
         }
 
         let blinding_alt = derive_independent_blind(blinding_scalar)?;
-        if bool::from(blinding_alt.is_zero())
-            || *blinding_alt == *secret_scalar
-            || *blinding_scalar == *blinding_alt
-        {
-            return Err(Error::InvalidScalar);
-        }
-
-        let s1 = Zeroizing::new(*blinding_scalar);
-        let s2 = Zeroizing::new(*secret_scalar - *s1);
-        let s3 = Zeroizing::new(*blinding_alt);
-        let s4 = Zeroizing::new(*secret_scalar - *s3);
-
-        if bool::from(s1.is_zero())
-            || bool::from(s2.is_zero())
-            || bool::from(s3.is_zero())
-            || bool::from(s4.is_zero())
-            || *s1 == *s3
-        {
-            return Err(Error::InvalidScalar);
-        }
-
-        let base_coord = Affine::from_k256(&base_point.to_affine());
-        let q_coord = ct_mul_add_split(&base_coord, &s1, &s2);
-        let check_coord = ct_mul_add_split(&base_coord, &s3, &s4);
-
-        if bool::from(q_coord.infinity) || bool::from(check_coord.infinity) {
-            return Err(Error::InvalidPoint);
-        }
-
-        let q_affine = q_coord.to_k256();
-        let check_affine = check_coord.to_k256();
-        let enc = Zeroizing::new(compressed(&q_affine)?);
-        let check_enc = Zeroizing::new(compressed(&check_affine)?);
-
-        // Fail-closed twist and on-curve invariant check.
-        let x: [u8; 32] = enc[1..33].try_into().map_err(|_| Error::InvalidPoint)?;
-        if is_on_quadratic_twist(&x) {
-            return Err(Error::InvalidPoint);
-        }
-
-        // Cross-check both independent blinded splits in constant time.
-        if bool::from(!enc.ct_eq(check_enc.as_slice())) {
-            return Err(Error::InvalidPoint);
-        }
-
-        Ok(q_affine)
+        Self::multiply_hardened_dual(secret_scalar, base_point, blinding_scalar, &blinding_alt)
     }
 
     /// Computes `Q = secret_scalar * base_point` using two explicit caller-supplied
@@ -127,58 +77,15 @@ impl HardenedMultiplier {
         blinding_1: &Scalar,
         blinding_2: &Scalar,
     ) -> Result<AffinePoint, Error> {
-        if bool::from(secret_scalar.is_zero()) {
-            return Err(Error::InvalidScalar);
-        }
-        if bool::from(base_point.is_identity()) {
-            return Err(Error::InvalidPoint);
-        }
-        if bool::from(blinding_1.is_zero())
-            || bool::from(blinding_2.is_zero())
-            || *blinding_1 == *blinding_2
-            || *blinding_1 == *secret_scalar
-            || *blinding_2 == *secret_scalar
-        {
-            return Err(Error::InvalidScalar);
-        }
-
-        let s1 = Zeroizing::new(*blinding_1);
-        let s2 = Zeroizing::new(*secret_scalar - *s1);
-        let s3 = Zeroizing::new(*blinding_2);
-        let s4 = Zeroizing::new(*secret_scalar - *s3);
-
-        if bool::from(s1.is_zero())
-            || bool::from(s2.is_zero())
-            || bool::from(s3.is_zero())
-            || bool::from(s4.is_zero())
-            || *s1 == *s3
-        {
-            return Err(Error::InvalidScalar);
-        }
-
-        let base_coord = Affine::from_k256(&base_point.to_affine());
-        let q_coord = ct_mul_add_split(&base_coord, &s1, &s2);
-        let check_coord = ct_mul_add_split(&base_coord, &s3, &s4);
-
-        if bool::from(q_coord.infinity) || bool::from(check_coord.infinity) {
-            return Err(Error::InvalidPoint);
-        }
-
-        let q_affine = q_coord.to_k256();
-        let check_affine = check_coord.to_k256();
-        let enc = Zeroizing::new(compressed(&q_affine)?);
-        let check_enc = Zeroizing::new(compressed(&check_affine)?);
-
-        let x: [u8; 32] = enc[1..33].try_into().map_err(|_| Error::InvalidPoint)?;
-        if is_on_quadratic_twist(&x) {
-            return Err(Error::InvalidPoint);
-        }
-
-        if bool::from(!enc.ct_eq(check_enc.as_slice())) {
-            return Err(Error::InvalidPoint);
-        }
-
-        Ok(q_affine)
+        let base_aff = base_point.to_affine();
+        let enc = Zeroizing::new(Self::multiply_dual_with_declassify(
+            secret_scalar,
+            &base_aff,
+            blinding_1,
+            blinding_2,
+            None,
+        )?);
+        point(enc.as_ref())
     }
 
     /// Constant-time dual-blinded multiplication with an explicit declassification
@@ -191,15 +98,18 @@ impl HardenedMultiplier {
         declassify: Option<fn(*const u8, usize)>,
     ) -> Result<[u8; 33], Error> {
         let base_coord = Affine::from_k256(base_point);
-        if bool::from(base_coord.infinity) {
+        if bool::from(!base_coord.is_on_curve()) {
             return Err(Error::InvalidPoint);
         }
+        let blind_sum = Zeroizing::new(*blinding_1 + *blinding_2);
         let invalid = (secret_scalar.is_zero()
             | blinding_1.is_zero()
             | blinding_2.is_zero()
             | blinding_1.ct_eq(blinding_2)
             | blinding_1.ct_eq(secret_scalar)
-            | blinding_2.ct_eq(secret_scalar))
+            | blinding_2.ct_eq(secret_scalar)
+            | blind_sum.is_zero()
+            | blind_sum.ct_eq(secret_scalar))
         .unwrap_u8();
         if let Some(f) = declassify {
             f(&invalid as *const u8, 1);
@@ -213,9 +123,11 @@ impl HardenedMultiplier {
         let s3 = Zeroizing::new(*blinding_2);
         let s4 = Zeroizing::new(*secret_scalar - *s3);
 
-        let q_coord = ct_mul_add_split(&base_coord, &s1, &s2);
-        let check_coord = ct_mul_add_split(&base_coord, &s3, &s4);
+        let mut q_coord = ct_mul_add_split(&base_coord, &s1, &s2);
+        let mut check_coord = ct_mul_add_split(&base_coord, &s3, &s4);
+        let valid_curve = (q_coord.is_on_curve() & check_coord.is_on_curve()).unwrap_u8();
         if let Some(f) = declassify {
+            f(&valid_curve as *const u8, 1);
             f(
                 (&q_coord as *const Affine).cast(),
                 core::mem::size_of::<Affine>(),
@@ -225,8 +137,15 @@ impl HardenedMultiplier {
                 core::mem::size_of::<Affine>(),
             );
         }
+        if valid_curve == 0 {
+            q_coord.zeroize_coords();
+            check_coord.zeroize_coords();
+            return Err(Error::InvalidPoint);
+        }
         let enc = q_coord.to_compressed_bytes()?;
-        let check_enc = check_coord.to_compressed_bytes()?;
+        let check_enc = Zeroizing::new(check_coord.to_compressed_bytes()?);
+        q_coord.zeroize_coords();
+        check_coord.zeroize_coords();
         if bool::from(!enc.ct_eq(check_enc.as_slice())) {
             return Err(Error::InvalidPoint);
         }

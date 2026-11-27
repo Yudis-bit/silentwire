@@ -66,4 +66,18 @@ fn hardened_multiplication_parity_blinding_and_degenerate_guards() {
         HardenedMultiplier::multiply_hardened_dual(&secret, &base, &blinding1, &secret),
         Err(Error::InvalidScalar)
     );
+    // Spec Theorem 7: reject b1 == -b2 and b1 + b2 == secret (swapped identical splits)
+    assert_eq!(
+        HardenedMultiplier::multiply_hardened_dual(&secret, &base, &blinding1, &(-blinding1)),
+        Err(Error::InvalidScalar)
+    );
+    assert_eq!(
+        HardenedMultiplier::multiply_hardened_dual(
+            &secret,
+            &base,
+            &blinding1,
+            &(secret - blinding1)
+        ),
+        Err(Error::InvalidScalar)
+    );
 }

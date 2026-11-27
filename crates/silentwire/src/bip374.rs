@@ -1,31 +1,28 @@
-//! `no_std` BIP-374 Discrete Log Equality (DLEQ) proofs and BIP-375
+//! `no_std` BIP-374 v0.3.1 Discrete Log Equality (DLEQ) proofs and BIP-375
 //! collaborative PSBT share verification + self-change collision guard.
 
 use crate::{
     comb, compressed,
     coordinates::Affine,
     hash::{
-        tagged_hash_inputs, tagged_hash_midstate, tagged_hash_shared_secret, MIDSTATE_BIP374_AUX,
-        MIDSTATE_BIP374_CHALLENGE, MIDSTATE_BIP374_NONCE,
+        tagged_hash_midstate, MIDSTATE_BIP374_AUX, MIDSTATE_BIP374_CHALLENGE, MIDSTATE_BIP374_NONCE,
     },
+    ssmb::GlvScalar,
+    Error,
+};
+#[cfg(feature = "alloc")]
+use crate::{
+    hash::{tagged_hash_inputs, tagged_hash_shared_secret},
     scalar,
     sender::{ProvenancedRecipient, RecipientOrigin},
-    ssmb::GlvScalar,
-    Error, K_MAX,
+    K_MAX,
 };
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use k256::elliptic_curve::{group::prime::PrimeCurveAffine, Group, PrimeField};
-use k256::{AffinePoint, ProjectivePoint, Scalar};
+use k256::elliptic_curve::{group::prime::PrimeCurveAffine, ops::Reduce, Group, PrimeField};
+use k256::{AffinePoint, ProjectivePoint, Scalar, U256};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
-
-fn parse_scalar_nonzero(bytes: [u8; 32]) -> Result<Scalar, Error> {
-    let s = Option::<Scalar>::from(Scalar::from_repr(bytes.into())).ok_or(Error::InvalidProof)?;
-    if bool::from(s.is_zero()) {
-        return Err(Error::InvalidProof);
-    }
-    Ok(s)
-}
+use zeroize::{Zeroize, Zeroizing};
 
 fn dleq_challenge(
     a_bytes: &[u8; 33],
@@ -37,20 +34,27 @@ fn dleq_challenge(
     msg: Option<&[u8]>,
 ) -> Result<Scalar, Error> {
     let digest = match msg {
-        Some(m) => tagged_hash_midstate(
-            MIDSTATE_BIP374_CHALLENGE,
-            &[a_bytes, b_bytes, c_bytes, g_bytes, r1_bytes, r2_bytes, m],
-        ),
+        Some(m) => {
+            if m.len() != 32 {
+                return Err(Error::InvalidProof);
+            }
+            tagged_hash_midstate(
+                MIDSTATE_BIP374_CHALLENGE,
+                &[a_bytes, b_bytes, c_bytes, g_bytes, r1_bytes, r2_bytes, m],
+            )
+        }
         None => tagged_hash_midstate(
             MIDSTATE_BIP374_CHALLENGE,
             &[a_bytes, b_bytes, c_bytes, g_bytes, r1_bytes, r2_bytes],
         ),
     };
-    parse_scalar_nonzero(digest)
+    Ok(<Scalar as Reduce<U256>>::reduce_bytes((&digest).into()))
 }
 
-/// Generates a 64-byte BIP-374 DLEQ proof `(e || s)` proving `log_G(A) == log_B(C)`
-/// where `A = a * G` and `C = a * B`.
+/// Generates a 64-byte BIP-374 v0.3.1 DLEQ proof `(e || s)` proving
+/// `log_G(A) == log_B(C)` where `A = a * G` and `C = a * B`.
+///
+/// When `msg` is `Some`, BIP-374 requires an exact 32-byte message.
 pub fn dleq_prove(
     secret_a: &Scalar,
     b_point: &AffinePoint,
@@ -62,8 +66,9 @@ pub fn dleq_prove(
 }
 
 /// Variant of `dleq_prove` with an explicit declassification hook for public wire
-/// outputs (`A`, `C`, `R1`, `R2`, `e`, and non-zero predicates), keeping `secret_a`
-/// and the ephemeral nonce `k` secret across all group multiplications and `s = k + e*a`.
+/// outputs (`A`, `C`, `R1`, `R2`, `proof`, and non-zero predicates), keeping
+/// `secret_a`, `aux_rand`, and the ephemeral nonce `k` secret across all group
+/// multiplications and `s = k + e*a`.
 pub fn dleq_prove_with_declassify(
     secret_a: &Scalar,
     b_point: &AffinePoint,
@@ -72,6 +77,11 @@ pub fn dleq_prove_with_declassify(
     msg: Option<&[u8]>,
     declassify: Option<fn(*const u8, usize)>,
 ) -> Result<[u8; 64], Error> {
+    if let Some(m) = msg {
+        if m.len() != 32 {
+            return Err(Error::InvalidProof);
+        }
+    }
     let a_zero = secret_a.is_zero().unwrap_u8();
     if let Some(f) = declassify {
         f(&a_zero as *const u8, 1);
@@ -119,14 +129,15 @@ pub fn dleq_prove_with_declassify(
         t[i] = a_scalar_bytes[i] ^ aux_hash[i];
     }
 
-    // rand = tagged_hash("BIP0374/nonce", t || C [|| msg])
+    // rand = tagged_hash("BIP0374/nonce", t || cbytes(A) || cbytes(C) || m')
     let rand = Zeroizing::new(match msg {
-        Some(m) => tagged_hash_midstate(MIDSTATE_BIP374_NONCE, &[t.as_ref(), &c_bytes, m]),
-        None => tagged_hash_midstate(MIDSTATE_BIP374_NONCE, &[t.as_ref(), &c_bytes]),
+        Some(m) => {
+            tagged_hash_midstate(MIDSTATE_BIP374_NONCE, &[t.as_ref(), &a_bytes, &c_bytes, m])
+        }
+        None => tagged_hash_midstate(MIDSTATE_BIP374_NONCE, &[t.as_ref(), &a_bytes, &c_bytes]),
     });
-    let ct_k = Scalar::from_repr((*rand).into());
-    let k_val = ct_k.unwrap_or(Scalar::ZERO);
-    let k_valid = (ct_k.is_some() & !k_val.is_zero()).unwrap_u8();
+    let k_val = <Scalar as Reduce<U256>>::reduce_bytes((&*rand).into());
+    let k_valid = (!k_val.is_zero()).unwrap_u8();
     if let Some(f) = declassify {
         f(&k_valid as *const u8, 1);
     }
@@ -166,10 +177,22 @@ pub fn dleq_prove_with_declassify(
     let mut proof = [0u8; 64];
     proof[..32].copy_from_slice(&e.to_bytes());
     proof[32..].copy_from_slice(&s.to_bytes());
+    if let Some(f) = declassify {
+        f(proof.as_ptr(), proof.len());
+    }
+    // BIP-374 fault-injection guard: abort if self-verification fails.
+    let a_aff = a_coord.to_k256();
+    let c_aff = c_coord.to_k256();
+    if dleq_verify(&a_aff, b_point, &c_aff, &proof, Some(&g_aff), msg).is_err() {
+        proof.zeroize();
+        return Err(Error::InvalidProof);
+    }
     Ok(proof)
 }
 
-/// Verifies a 64-byte BIP-374 DLEQ proof `(e || s)` for `(A, B, C, G)`.
+/// Verifies a 64-byte BIP-374 v0.3.1 DLEQ proof `(e || s)` for `(A, B, C, G)`.
+///
+/// When `msg` is `Some`, BIP-374 requires an exact 32-byte message.
 pub fn dleq_verify(
     a_point: &AffinePoint,
     b_point: &AffinePoint,
@@ -178,6 +201,11 @@ pub fn dleq_verify(
     g_point: Option<&AffinePoint>,
     msg: Option<&[u8]>,
 ) -> Result<(), Error> {
+    if let Some(m) = msg {
+        if m.len() != 32 {
+            return Err(Error::InvalidProof);
+        }
+    }
     let g_aff = g_point.copied().unwrap_or(AffinePoint::GENERATOR);
     if bool::from(a_point.is_identity())
         || bool::from(b_point.is_identity())
@@ -189,7 +217,7 @@ pub fn dleq_verify(
 
     let e_bytes: [u8; 32] = proof[..32].try_into().unwrap();
     let s_bytes: [u8; 32] = proof[32..].try_into().unwrap();
-    let e = parse_scalar_nonzero(e_bytes)?;
+    let e = Option::<Scalar>::from(Scalar::from_repr(e_bytes.into())).ok_or(Error::InvalidProof)?;
     let s = Option::<Scalar>::from(Scalar::from_repr(s_bytes.into())).ok_or(Error::InvalidProof)?;
 
     let g_proj = ProjectivePoint::from(g_aff);
@@ -235,6 +263,7 @@ pub struct Bip375SignerShare {
 /// with an `OwnVerified` change recipient and `B_spend_external < B_spend_change`,
 /// BIP-375 assigns `k = 0` to the external recipient and `k = 1` to the wallet's
 /// own change, rendering the change invisible to standard BIP-352 recovery.
+#[cfg(feature = "alloc")]
 pub fn audit_bip375_recipient_ordering(recipients: &[ProvenancedRecipient]) -> Result<(), Error> {
     let mut keys: Vec<([u8; 33], [u8; 33], RecipientOrigin)> = Vec::with_capacity(recipients.len());
     for r in recipients {
@@ -272,17 +301,30 @@ pub fn audit_bip375_recipient_ordering(recipients: &[ProvenancedRecipient]) -> R
 }
 
 /// Verifies all BIP-375 signer DLEQ shares for one recipient `scan_pubkey`, aggregates
-/// `C_sum`, folds `S = input_hash * C_sum`, and derives `output_count` Taproot x-only
-/// output keys.
+/// `C_sum`, folds `S = input_hash * C_sum`, assigns `k` by lexicographical ascending
+/// compressed `B_spend` (breaking ties by ascending output index per BIP-375), and
+/// returns Taproot x-only output keys in the caller's original positional order.
+#[cfg(feature = "alloc")]
 pub fn derive_bip375_outputs(
     signers: &[Bip375SignerShare],
     scan_pubkey: &AffinePoint,
     smallest_outpoint: &[u8; 36],
     spend_pubkeys: &[AffinePoint],
 ) -> Result<Vec<[u8; 32]>, Error> {
-    if signers.is_empty() || spend_pubkeys.is_empty() || spend_pubkeys.len() > K_MAX as usize {
+    if signers.is_empty() || spend_pubkeys.is_empty() {
+        return Err(Error::InvalidPoint);
+    }
+    if spend_pubkeys.len() > K_MAX as usize {
         return Err(Error::BatchTooLarge);
     }
+
+    let mut ordered_spends: Vec<([u8; 33], usize, AffinePoint)> =
+        Vec::with_capacity(spend_pubkeys.len());
+    for (idx, spend) in spend_pubkeys.iter().enumerate() {
+        let enc = compressed(spend)?;
+        ordered_spends.push((enc, idx, *spend));
+    }
+    ordered_spends.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     let mut input_sum = ProjectivePoint::IDENTITY;
     let mut share_sum = ProjectivePoint::IDENTITY;
@@ -310,17 +352,15 @@ pub fn derive_bip375_outputs(
     }
     let shared_bytes = Zeroizing::new(compressed(&shared_proj.to_affine())?);
 
-    let mut outputs = Vec::with_capacity(spend_pubkeys.len());
-    for (k, spend) in spend_pubkeys.iter().enumerate() {
+    let mut outputs = alloc::vec![[0u8; 32]; spend_pubkeys.len()];
+    for (k, (_, orig_idx, spend)) in ordered_spends.into_iter().enumerate() {
         let t_k = Zeroizing::new(scalar(tagged_hash_shared_secret(&shared_bytes, k as u32))?);
-        let out_proj = ProjectivePoint::from(*spend) + comb::multiply_generator(&t_k);
+        let out_proj = ProjectivePoint::from(spend) + comb::multiply_generator(&t_k);
         if bool::from(out_proj.is_identity()) {
             return Err(Error::InvalidPoint);
         }
         let enc = compressed(&out_proj.to_affine())?;
-        let mut x_only = [0u8; 32];
-        x_only.copy_from_slice(&enc[1..33]);
-        outputs.push(x_only);
+        outputs[orig_idx].copy_from_slice(&enc[1..33]);
     }
     Ok(outputs)
 }
@@ -328,6 +368,7 @@ pub fn derive_bip375_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "alloc")]
     use crate::sender::Recipient;
 
     #[test]
@@ -341,12 +382,21 @@ mod tests {
         let proof = dleq_prove(&a, &b, &aux, None, None).unwrap();
         assert!(dleq_verify(&a_pub, &b, &c_pub, &proof, None, None).is_ok());
 
-        // With optional message
-        let msg = b"bip374-domain-test";
-        let proof_msg = dleq_prove(&a, &b, &aux, None, Some(msg)).unwrap();
-        assert!(dleq_verify(&a_pub, &b, &c_pub, &proof_msg, None, Some(msg)).is_ok());
+        // With optional 32-byte message
+        let msg = [0x37u8; 32];
+        let proof_msg = dleq_prove(&a, &b, &aux, None, Some(&msg)).unwrap();
+        assert!(dleq_verify(&a_pub, &b, &c_pub, &proof_msg, None, Some(&msg)).is_ok());
         assert_eq!(
             dleq_verify(&a_pub, &b, &c_pub, &proof_msg, None, None),
+            Err(Error::InvalidProof)
+        );
+        // Non-32-byte message rejected per BIP-374
+        assert_eq!(
+            dleq_prove(&a, &b, &aux, None, Some(b"too-short")),
+            Err(Error::InvalidProof)
+        );
+        assert_eq!(
+            dleq_verify(&a_pub, &b, &c_pub, &proof_msg, None, Some(b"too-short")),
             Err(Error::InvalidProof)
         );
 
@@ -372,6 +422,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn bip375_lex_order_change_shadowing_and_output_derivation() {
         let scan = (ProjectivePoint::GENERATOR * Scalar::from(5u64)).to_affine();
@@ -454,7 +505,7 @@ mod tests {
             Err(Error::ScanKeyCollision)
         );
 
-        // End-to-end 2-signer BIP-375 derivation matches direct sender math.
+        // End-to-end 2-signer BIP-375 derivation assigns k by lex order regardless of input slice order.
         let a1 = Scalar::from(101u64);
         let a2 = Scalar::from(202u64);
         let s1 = Bip375SignerShare {
@@ -467,8 +518,15 @@ mod tests {
             ecdh_share: (ProjectivePoint::from(scan) * a2).to_affine(),
             dleq_proof: dleq_prove(&a2, &scan, &[2u8; 32], None, None).unwrap(),
         };
-        let outs = derive_bip375_outputs(&[s1, s2], &scan, &[0u8; 36], &[sp_small, sp_large])
-            .expect("valid bip375 shares");
-        assert_eq!(outs.len(), 2);
+        let outs_ordered =
+            derive_bip375_outputs(&[s1, s2], &scan, &[0u8; 36], &[sp_small, sp_large])
+                .expect("valid bip375 shares");
+        let outs_swapped =
+            derive_bip375_outputs(&[s1, s2], &scan, &[0u8; 36], &[sp_large, sp_small])
+                .expect("valid bip375 shares");
+        assert_eq!(outs_ordered.len(), 2);
+        // Positional mapping preserved, k assigned lexicographically:
+        assert_eq!(outs_swapped[0], outs_ordered[1]);
+        assert_eq!(outs_swapped[1], outs_ordered[0]);
     }
 }

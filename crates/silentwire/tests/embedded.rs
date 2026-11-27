@@ -87,8 +87,12 @@ fn embedded_static_scanner_exact_match_change_isolation_and_twist_rejection() {
     scanner.add_tweak(&gen_bytes).expect("second tweak");
     scanner.add_output(&[0x22; 32]).expect("tx1 dummy");
 
+    // Tx 2 also matches so we verify multi-transaction index disambiguation.
+    scanner.add_tweak(&tweak).expect("third tweak");
+    scanner.add_output(&expected_out).expect("tx2 real output");
+
     let matches = scanner.scan().expect("successful scan");
-    assert_eq!(matches.len(), 2);
+    assert_eq!(matches.len(), 3);
     assert_eq!(matches[0].output_index, 1);
     assert_eq!(matches[0].derivation_index, 0);
     assert_eq!(matches[0].label, None);
@@ -103,6 +107,21 @@ fn embedded_static_scanner_exact_match_change_isolation_and_twist_rejection() {
         matches[1].tweak_scalar,
         <[u8; 32]>::from((t1 + label0).to_bytes())
     );
+
+    assert_eq!(matches[2].output_index, 0);
+    assert_eq!(matches[2].derivation_index, 0);
+    assert_eq!(matches[2].taproot_pubkey, expected_out);
+    assert_eq!(scanner.match_transaction_indices(), &[0, 0, 2]);
+
+    let mut indexed_out = [silentwire::BlockPaymentMatch::default(); 4];
+    let indexed_count = scanner
+        .scan_indexed(&mut indexed_out)
+        .expect("scan_indexed");
+    assert_eq!(indexed_count, 3);
+    assert_eq!(indexed_out[0].transaction_index, 0);
+    assert_eq!(indexed_out[1].transaction_index, 0);
+    assert_eq!(indexed_out[2].transaction_index, 2);
+    assert_eq!(indexed_out[2].payment.output_index, 0);
 
     // Streaming scan_tx recovers both outputs without touching internal tweak buffer
     let stream_matches = scanner

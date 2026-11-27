@@ -1,8 +1,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
 pub mod address;
 pub mod batch;
 pub mod bip374;
@@ -13,24 +15,55 @@ pub mod hardened;
 mod hash;
 pub mod input;
 pub mod matcher;
+#[cfg(feature = "alloc")]
 mod scanner;
 pub mod sender;
 pub mod ssmb;
 
+#[cfg(feature = "alloc")]
 pub use address::{Network, SilentPaymentAddress};
-pub use bip374::{
-    audit_bip375_recipient_ordering, derive_bip375_outputs, dleq_prove, dleq_verify,
-    Bip375SignerShare,
-};
+#[cfg(feature = "alloc")]
+pub use bip374::{audit_bip375_recipient_ordering, derive_bip375_outputs};
+pub use bip374::{dleq_prove, dleq_verify, Bip375SignerShare};
 pub use embedded::EmbeddedStaticScanner;
 pub use hardened::{audit_candidate_tweak, is_on_quadratic_twist, HardenedMultiplier};
 pub use k256;
-pub use scanner::{
-    BlockPaymentMatch, ScanContext, ScanTransaction, SilentPaymentMatch, SpScannerNaive,
-    ADAPTIVE_LABEL_THRESHOLD,
-};
+#[cfg(feature = "alloc")]
+pub use scanner::{ScanContext, ScanTransaction, SpScannerNaive, ADAPTIVE_LABEL_THRESHOLD};
 pub use subtle;
 pub use zeroize;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SilentPaymentMatch {
+    pub output_index: u32,
+    pub derivation_index: u32,
+    pub taproot_pubkey: [u8; 32],
+    pub tweak_scalar: [u8; 32],
+    pub label: Option<u32>,
+}
+
+impl zeroize::Zeroize for SilentPaymentMatch {
+    fn zeroize(&mut self) {
+        self.output_index.zeroize();
+        self.derivation_index.zeroize();
+        self.taproot_pubkey.zeroize();
+        self.tweak_scalar.zeroize();
+        self.label = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BlockPaymentMatch {
+    pub transaction_index: usize,
+    pub payment: SilentPaymentMatch,
+}
+
+impl zeroize::Zeroize for BlockPaymentMatch {
+    fn zeroize(&mut self) {
+        self.transaction_index.zeroize();
+        self.payment.zeroize();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

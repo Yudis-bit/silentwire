@@ -95,20 +95,32 @@ pub fn extract_key(input: &ValidatedInput<'_>) -> Result<Option<AffinePoint>, Er
     if script.len() == 25 && script[..3] == [0x76, 0xa9, 0x14] && script[23..] == [0x88, 0xac] {
         return Ok(extract_p2pkh_push_pubkey(input.script_sig, &script[3..23]));
     }
-    let p2wpkh = script.len() == 22 && script[..2] == [0, 20];
-    // BIP-141 requires nested P2SH-P2WPKH scriptSig to be the exact 23-byte
-    // direct push [0x16, 0x00, 0x14, <20-byte-hash>] matching HASH160(redeem).
-    let nested = script.len() == 23
+    let expected_wpkh_hash: Option<&[u8]> = if script.len() == 22 && script[..2] == [0, 20] {
+        Some(&script[2..22])
+    } else if script.len() == 23
         && script[..2] == [0xa9, 20]
         && script[22] == 0x87
         && input.script_sig.len() == 23
         && input.script_sig[..3] == [22, 0, 20]
-        && hash160::Hash::hash(&input.script_sig[1..]).as_byte_array()[..] == script[2..22];
-    if p2wpkh || nested {
+        && hash160::Hash::hash(&input.script_sig[1..]).as_byte_array()[..] == script[2..22]
+    {
+        // BIP-141 requires nested P2SH-P2WPKH scriptSig to be the exact 23-byte
+        // direct push [0x16, 0x00, 0x14, <20-byte-hash>] matching HASH160(redeem).
+        Some(&input.script_sig[3..23])
+    } else {
+        None
+    };
+    if let Some(expected_hash) = expected_wpkh_hash {
         if input.witness.len() != 2 {
             return Ok(None);
         }
-        return Ok(input.witness.last().and_then(|key| point(key).ok()));
+        let pubkey_bytes = input.witness[1];
+        if pubkey_bytes.len() != 33
+            || hash160::Hash::hash(pubkey_bytes).as_byte_array()[..] != *expected_hash
+        {
+            return Ok(None);
+        }
+        return Ok(point(pubkey_bytes).ok());
     }
     if let Some(x) = crate::p2tr_key(script) {
         let mut witness = input.witness;
