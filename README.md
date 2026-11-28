@@ -2,10 +2,17 @@ silentwire
 ==========
 
 [![CI](https://github.com/Yudis-bit/silentwire/actions/workflows/ci.yml/badge.svg)](https://github.com/Yudis-bit/silentwire/actions)
+[![crates.io](https://img.shields.io/crates/v/silentwire.svg)](https://crates.io/crates/silentwire)
+[![docs.rs](https://docs.rs/silentwire/badge.svg)](https://docs.rs/silentwire)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 BIP-352 Silent Payments scanning, sending, address coding, and BIP-374/375
 helpers in Rust.
+
+```sh
+cargo add silentwire
+cargo add bdk-silentwire
+```
 
 ```rust
 let mut scanner = silentwire::ScanContext::new();
@@ -41,7 +48,7 @@ signed radix-16 digits so per-base tables carry no secret state. Each base
 computes `[2..8]*P` with Jacobian `3M + 4S` doublings and `7M + 4S`
 `madd-2007-bl` additions, deriving `phi(j*P) = (beta * x_j, y_j)` on the fly.
 Up to 32 transactions (224 precomp points) normalize in one branchless
-`MontgomeryBatchInverter` pass. Evaluation runs 128 Jacobian doublings and 66
+`MontgomeryBatchInverter` pass. Evaluation runs 128 Jacobian doublings and 65
 complete Brier-Joye (`7M + 5S`) mixed additions, then batch-normalizes all 32
 shared secrets in a second pass.
 

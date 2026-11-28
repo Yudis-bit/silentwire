@@ -54,7 +54,7 @@ branchless MontgomeryBatchInverter call. The endomorphism table entries are
 evaluated on the fly via phi(j*P) = (beta * x_j, y_j) with zero extra group
 additions or inversions.
 
-Online evaluation runs 128 Jacobian doublings (3M + 4S) and 66 complete
+Online evaluation runs 128 Jacobian doublings (3M + 4S) and 65 complete
 Brier-Joye Jacobian+Affine mixed additions (7M + 5S, scaled by s = 2 to avoid
 halving, handling infinity, doubling, inverses, and endomorphism pairs
 y1 = -y2, x1 != x2 without branches). All 32 resulting shared secrets normalize
